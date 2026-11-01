@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+exec python3 /mnt/hdd/browser/alveria/alveria_browser.py "$@"

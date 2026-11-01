@@ -1,2 +1,9 @@
 target/
 .DS_Store
+storage/
+logs/
+__pycache__/
+*.pyc
+bin/obscura-core
+bin/obscura-worker
+*.log
