@@ -69,10 +69,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
-# Deteksi root path: prioritaskan folder repo saat ini, fallback ke STB
+# Deteksi root path: folder instalasi alveria-browser
 HOME = Path(__file__).resolve().parent
-if not (HOME / "bin" / "obscura-core").exists() and Path("/mnt/hdd/browser/alveria/bin/obscura-core").exists():
-    HOME = Path("/mnt/hdd/browser/alveria")
 CORE = HOME / "bin" / "obscura-core"
 DEFAULT_PORT = 9222
 
@@ -815,7 +813,7 @@ class Alveria:
     def _env(self) -> dict:
         env = {
             "PATH": "/usr/bin:/bin",
-            "HOME": "/root",
+            "HOME": os.environ.get("HOME", str(Path.home())),
             # tuning wajib: tanpa ini React/Remix gagal hydrate
             "OBSCURA_MODULE_BUDGET_MS": "60000",
             "OBSCURA_SCRIPT_DEADLINE_MS": "60000",
