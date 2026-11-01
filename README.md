@@ -28,8 +28,10 @@ Traditional headless browsers (Chromium, Puppeteer, Camoufox) are **monolithic b
 | **WebGL Context** | Real GPU | Real GPU | `null` ❌ | **Unmasked Stub** ✅ |
 | **Canvas Noise** | None | Randomized | None ❌ | **Deterministic LCG** ✅ |
 | **AudioContext Noise** | None | Randomized | None ❌ | **Injected Noise** ✅ |
+| **Client Hints Sync** | None | Simulated | None ❌ | **HTTP & JS (`userAgentData`)** ✅ |
 | **Font Protection** | Leaked | Protected | Leaked ❌ | **Platform Whitelist** ✅ |
 | **Human Simulation** | None | Manual | None ❌ | **Bézier + Gaussian** ✅ |
+| **Procedural Random Profiles** | None | Supported | None ❌ | **Dynamic Matched Pools** ✅ |
 | **Turnstile Harvester** | None | None | None ❌ | **Built-in** ✅ |
 
 ---
@@ -62,6 +64,8 @@ Alveria injects zero-overhead native patches before any script executes on the p
 7. **SpeechSynthesis Voices**: Generates native OS voice profiles (Microsoft David/Zira for Win32, Samantha/Alex for Mac).
 8. **WebRTC IP Shield**: Blocks internal IP leakage by filtering `RTCPeerConnection` ice servers and stripping host candidates.
 9. **Tracker & Analytics Blocker**: Automatically drops connections to resource-heavy telemetry (Google Analytics, Clarity, Hotjar, Sentry, Facebook/TikTok pixels) saving bandwidth and keeping RAM usage minimal.
+10. **Client Hints Synchronization**: Bridges both the network layer (`Sec-CH-UA`, `Sec-CH-UA-Platform`, `Sec-CH-UA-Mobile`) and the JavaScript API (`navigator.userAgentData` with `getHighEntropyValues()`), ensuring Cloudflare and enterprise WAFs observe 100% matched signals.
+11. **Procedural Profile Generator**: Support for `profile="random"` generates mathematically coherent identities (screen, GPU model, cores, memory, OS) on the fly, preventing device repetition across large scraping fleets.
 
 ---
 
@@ -140,6 +144,7 @@ Every profile synchronizes User-Agent, platform, hardwareConcurrency, deviceMemo
 | **5** | `macbook-air-m2` | MacIntel | 8 | 8 GB | 1440×900 @2x | Asia/Jakarta |
 | **6** | `win10-lowend` | Win32 | 4 | 4 GB | 1366×768 | Asia/Jakarta |
 | **7** | `linux-ubuntu-iris` | Linux x86_64 | 8 | 16 GB | 1920×1080 | Asia/Jakarta |
+| **`random`** | `procedural-random` | Dynamic (Win/Mac/Linux) | 4–16 | 8–16 GB | Matched | Asia/Jakarta |
 
 ---
 

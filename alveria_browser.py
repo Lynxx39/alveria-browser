@@ -57,6 +57,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import os
 import random
 import signal
@@ -237,6 +238,47 @@ class Profile:
     fonts: list[str] = field(default_factory=lambda: WINDOWS_FONTS)
     voices: list[dict] = field(default_factory=lambda: WINDOWS_VOICES)
 
+    @property
+    def chrome_major(self) -> str:
+        m = re.search(r"Chrome/(\d+)", self.ua)
+        return m.group(1) if m else "145"
+
+    @property
+    def chrome_full(self) -> str:
+        m = re.search(r"Chrome/([\d.]+)", self.ua)
+        return m.group(1) if m else "145.0.0.0"
+
+    @property
+    def ch_platform(self) -> str:
+        if "Win" in self.platform:
+            return "Windows"
+        elif "Mac" in self.platform:
+            return "macOS"
+        elif "Linux" in self.platform:
+            return "Linux"
+        return self.platform
+
+    @property
+    def architecture(self) -> str:
+        return "arm" if "Apple" in self.webgl_renderer or "aarch64" in self.ua else "x86"
+
+    @property
+    def platform_version(self) -> str:
+        if "Win" in self.platform:
+            return "15.0.0" if "11" in self.name else "10.0.0"
+        elif "Mac" in self.platform:
+            return "14.4.1"
+        return "6.5.0"
+
+    def client_hints(self) -> dict[str, str]:
+        major = self.chrome_major
+        return {
+            "sec-ch-ua": f'"Chromium";v="{major}", "Not=A?Brand";v="24", "Google Chrome";v="{major}"',
+            "sec-ch-ua-mobile": "?1" if self.mobile else "?0",
+            "sec-ch-ua-platform": f'"{self.ch_platform}"',
+            "Accept-Language": f"{self.locale},en;q=0.9",
+        }
+
 
 def _win(ver: str) -> str:
     return ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -278,6 +320,76 @@ PROFILES: dict[int, Profile] = {
 }
 
 
+def create_random_profile(seed: Optional[int] = None) -> Profile:
+    """Generate realistic plausible random profile (Windows/macOS/Linux)."""
+    rng = random.Random(seed)
+    os_type = rng.choices(["win", "mac", "linux"], weights=[70, 20, 10])[0]
+    ver = rng.choice(["143", "144", "145", "146"])
+
+    if os_type == "win":
+        gpu = rng.choice([
+            ("Google Inc. (Intel)", "ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)", (1920, 1080), 8, 8),
+            ("Google Inc. (NVIDIA)", "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)", (1920, 1080), 16, 16),
+            ("Google Inc. (NVIDIA)", "ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 Direct3D11 vs_5_0 ps_5_0, D3D11)", (1920, 1080), 8, 16),
+            ("Google Inc. (AMD)", "ANGLE (AMD, AMD Radeon RX 6600 Direct3D11 vs_5_0 ps_5_0, D3D11)", (2560, 1440), 12, 16),
+            ("Google Inc. (Intel)", "ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)", (1920, 1080), 8, 8),
+        ])
+        return Profile(
+            name=f"win-rand-{rng.randint(100, 999)}",
+            ua=_win(ver),
+            platform="Win32",
+            vendor="Google Inc.",
+            cores=gpu[3],
+            memory=gpu[4],
+            webgl_vendor=gpu[0],
+            webgl_renderer=gpu[1],
+            timezone="Asia/Jakarta",
+            locale="en-US",
+            screen=gpu[2],
+            device_scale=1.0,
+            fonts=WINDOWS_FONTS,
+            voices=WINDOWS_VOICES,
+        )
+    elif os_type == "mac":
+        gpu = rng.choice([
+            ("Google Inc. (Apple)", "ANGLE (Apple, ANGLE Metal Renderer: Apple M2, Unspecified Version)", (1440, 900), 8, 8),
+            ("Google Inc. (Apple)", "ANGLE (Apple, ANGLE Metal Renderer: Apple M3 Pro, Unspecified Version)", (1512, 982), 10, 16),
+        ])
+        return Profile(
+            name=f"mac-rand-{rng.randint(100, 999)}",
+            ua=_mac(ver),
+            platform="MacIntel",
+            vendor="Google Inc.",
+            cores=gpu[3],
+            memory=gpu[4],
+            webgl_vendor=gpu[0],
+            webgl_renderer=gpu[1],
+            timezone="Asia/Jakarta",
+            locale="en-US",
+            screen=gpu[2],
+            device_scale=2.0,
+            fonts=MAC_FONTS,
+            voices=MAC_VOICES,
+        )
+    else:
+        return Profile(
+            name=f"linux-rand-{rng.randint(100, 999)}",
+            ua=_linux(ver),
+            platform="Linux x86_64",
+            vendor="Google Inc.",
+            cores=8,
+            memory=16,
+            webgl_vendor="Google Inc. (Intel)",
+            webgl_renderer="ANGLE (Intel, Mesa Intel(R) Iris(R) Xe Graphics (TGL GT2), OpenGL 4.6)",
+            timezone="Asia/Jakarta",
+            locale="en-US",
+            screen=(1920, 1080),
+            device_scale=1.0,
+            fonts=LINUX_FONTS,
+            voices=WINDOWS_VOICES,
+        )
+
+
 # ---------------------------------------------------------------- Stealth JS Generator
 def stealth_js(p: Profile, seed: int) -> str:
     """Init script: konsisten dengan profil, noise deterministik per sesi."""
@@ -316,6 +428,46 @@ def stealth_js(p: Profile, seed: int) -> str:
   def(navigator, 'deviceMemory', {p.memory});
   def(navigator, 'languages', {lang_json});
   def(navigator, 'maxTouchPoints', {1 if p.touch else 0});
+
+  // =========================================================================
+  // 1.1 CLIENT HINTS JAVASCRIPT API (navigator.userAgentData)
+  // =========================================================================
+  const chPlatform = {json.dumps(p.ch_platform)};
+  const chBrands = [
+    {{ brand: 'Chromium', version: {json.dumps(p.chrome_major)} }},
+    {{ brand: 'Not=A?Brand', version: '24' }},
+    {{ brand: 'Google Chrome', version: {json.dumps(p.chrome_major)} }}
+  ];
+  const uad = {{
+    brands: chBrands,
+    mobile: {json.dumps(p.mobile)},
+    platform: chPlatform,
+    getHighEntropyValues: async (hints = []) => {{
+      const res = {{
+        brands: chBrands,
+        mobile: {json.dumps(p.mobile)},
+        platform: chPlatform,
+      }};
+      if (hints.includes('architecture')) res.architecture = {json.dumps(p.architecture)};
+      if (hints.includes('bitness')) res.bitness = '64';
+      if (hints.includes('model')) res.model = '';
+      if (hints.includes('platformVersion')) res.platformVersion = {json.dumps(p.platform_version)};
+      if (hints.includes('uaFullVersion')) res.uaFullVersion = {json.dumps(p.chrome_full)};
+      if (hints.includes('fullVersionList')) res.fullVersionList = [
+        {{ brand: 'Chromium', version: {json.dumps(p.chrome_full)} }},
+        {{ brand: 'Not=A?Brand', version: '24.0.0.0' }},
+        {{ brand: 'Google Chrome', version: {json.dumps(p.chrome_full)} }}
+      ];
+      return res;
+    }},
+    toJSON: () => ({{ brands: chBrands, mobile: {json.dumps(p.mobile)}, platform: chPlatform }}),
+  }};
+  def(navigator, 'userAgentData', uad);
+  if (window.NavigatorUAData) {{
+    try {{
+      NavigatorUAData.prototype.getHighEntropyValues = uad.getHighEntropyValues;
+    }} catch (e) {{}}
+  }}
 
   // Network Information API spoof
   const connectionObj = {{
@@ -630,8 +782,18 @@ class Alveria:
                  proxy: str | None = None, headless: bool = True,
                  block_trackers: bool = True, extra_env: dict | None = None,
                  log: bool = True):
-        self.profile = PROFILES[profile] if isinstance(profile, int) else PROFILES[1]
-        self.profile_num = profile if isinstance(profile, int) else 1
+        if profile == "random":
+            self.profile = create_random_profile()
+            self.profile_num = 1 if "win" in self.profile.name else (4 if "mac" in self.profile.name else 7)
+        elif isinstance(profile, int) and profile in PROFILES:
+            self.profile = PROFILES[profile]
+            self.profile_num = profile
+        elif isinstance(profile, str) and profile.isdigit() and int(profile) in PROFILES:
+            self.profile = PROFILES[int(profile)]
+            self.profile_num = int(profile)
+        else:
+            self.profile = PROFILES[1]
+            self.profile_num = 1
         self.port = port
         self.proxy = proxy
         self.headless = headless
@@ -714,6 +876,7 @@ class Alveria:
                 is_mobile=self.profile.mobile,
                 has_touch=self.profile.touch,
                 java_script_enabled=True,
+                extra_http_headers=self.profile.client_hints(),
             )
             # Pasang stealth JS injection
             self._ctx.add_init_script(stealth_js(self.profile, self.session_seed))
@@ -921,25 +1084,25 @@ def main():
     f.add_argument("url")
     f.add_argument("--eval", default="document.title")
     f.add_argument("--wait", type=float, default=15)
-    f.add_argument("--profile", type=int, default=1)
+    f.add_argument("--profile", default="1", help="Profile 1-7 atau random")
     f.add_argument("--proxy")
 
     s = sub.add_parser("shot", help="screenshot")
     s.add_argument("url")
     s.add_argument("out")
     s.add_argument("--wait", type=float, default=15)
-    s.add_argument("--profile", type=int, default=1)
+    s.add_argument("--profile", default="1", help="Profile 1-7 atau random")
     s.add_argument("--proxy")
 
     t = sub.add_parser("turnstile", help="tunggu dan extract token Turnstile")
     t.add_argument("url")
-    t.add_argument("--profile", type=int, default=1)
+    t.add_argument("--profile", default="1", help="Profile 1-7 atau random")
     t.add_argument("--wait", type=float, default=45)
     t.add_argument("--proxy")
 
     sv = sub.add_parser("serve", help="foreground CDP server")
     sv.add_argument("--port", type=int, default=DEFAULT_PORT)
-    sv.add_argument("--profile", type=int, default=1)
+    sv.add_argument("--profile", default="1", help="Profile 1-7 atau random")
     sv.add_argument("--proxy")
 
     sub.add_parser("profiles", help="list profil")
@@ -955,10 +1118,12 @@ def main():
         for n, p in PROFILES.items():
             print(f"{n}: {p.name:18s} {p.platform:11s} cores={p.cores:<2d} mem={p.memory:2d}GB "
                   f"screen={p.screen[0]}x{p.screen[1]} tz={p.timezone}")
+        print("random: Procedural Profile    Auto-gen    Realistic matched GPU/OS/RAM combination")
         return 0
 
     if a.cmd == "serve":
-        br = Alveria(profile=a.profile, port=a.port, proxy=a.proxy)
+        prof = int(a.profile) if str(a.profile).isdigit() else a.profile
+        br = Alveria(profile=prof, port=a.port, proxy=a.proxy)
         br.start()
         print(f"CDP: http://127.0.0.1:{a.port}  profile={br.profile.name}", flush=True)
         try:
@@ -970,7 +1135,8 @@ def main():
         return 0
 
     if a.cmd == "fetch":
-        with Alveria(profile=a.profile, proxy=a.proxy) as br:
+        prof = int(a.profile) if str(a.profile).isdigit() else a.profile
+        with Alveria(profile=prof, proxy=a.proxy) as br:
             pg = br.page()
             pg.goto(a.url, wait_until="domcontentloaded", timeout=90000)
             br.wait_settle(pg, a.wait)
@@ -979,7 +1145,8 @@ def main():
         return 0
 
     if a.cmd == "shot":
-        with Alveria(profile=a.profile, proxy=a.proxy) as br:
+        prof = int(a.profile) if str(a.profile).isdigit() else a.profile
+        with Alveria(profile=prof, proxy=a.proxy) as br:
             pg = br.page()
             pg.goto(a.url, wait_until="domcontentloaded", timeout=90000)
             br.wait_settle(pg, a.wait)
@@ -988,7 +1155,8 @@ def main():
         return 0
 
     if a.cmd == "turnstile":
-        with Alveria(profile=a.profile, proxy=a.proxy) as br:
+        prof = int(a.profile) if str(a.profile).isdigit() else a.profile
+        with Alveria(profile=prof, proxy=a.proxy) as br:
             pg = br.page()
             pg.goto(a.url, wait_until="domcontentloaded", timeout=90000)
             token = br.extract_turnstile_token(pg, timeout=a.wait)
