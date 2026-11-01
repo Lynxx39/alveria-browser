@@ -68,11 +68,91 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
-# Deteksi root path: jika di STB /mnt/hdd/browser/alveria, jika di lokal pakai current dir
-_DEFAULT_STB_HOME = Path("/mnt/hdd/browser/alveria")
-HOME = _DEFAULT_STB_HOME if _DEFAULT_STB_HOME.exists() else Path(__file__).resolve().parent
+# Deteksi root path: prioritaskan folder repo saat ini, fallback ke STB
+HOME = Path(__file__).resolve().parent
+if not (HOME / "bin" / "obscura-core").exists() and Path("/mnt/hdd/browser/alveria/bin/obscura-core").exists():
+    HOME = Path("/mnt/hdd/browser/alveria")
 CORE = HOME / "bin" / "obscura-core"
 DEFAULT_PORT = 9222
+
+
+def ensure_core() -> Path:
+    """Mengecek keberadaan binary engine Obscura. Jika belum ada, otomatis download dari GitHub Release."""
+    bin_dir = HOME / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    target_bin = bin_dir / "obscura-core"
+
+    if target_bin.exists() and os.access(target_bin, os.X_OK):
+        return target_bin
+
+    alt_bin = bin_dir / "obscura"
+    if alt_bin.exists():
+        if not target_bin.exists():
+            try:
+                alt_bin.rename(target_bin)
+            except Exception:
+                pass
+        if target_bin.exists():
+            try:
+                os.chmod(target_bin, 0o755)
+            except Exception:
+                pass
+            return target_bin
+
+    import platform
+    import tarfile
+    import urllib.request
+
+    machine = platform.machine().lower()
+    if machine in ("aarch64", "arm64", "armv8"):
+        arch_suffix = "aarch64-linux-stealth"
+    elif machine in ("x86_64", "amd64"):
+        arch_suffix = "x86_64-linux-stealth"
+    else:
+        raise RuntimeError(f"Arsitektur CPU '{machine}' belum didukung binary native Obscura.")
+
+    url = f"https://github.com/h4ckf0r0day/obscura/releases/latest/download/obscura-{arch_suffix}.tar.gz"
+    print(f"\n[alveria] Core engine belum terpasang. Mengunduh otomatis ({arch_suffix})...", file=sys.stderr)
+    print(f"[alveria] Sumber: {url}", file=sys.stderr)
+
+    tar_path = bin_dir / f"obscura-{arch_suffix}.tar.gz"
+
+    def _progress(count, block_size, total_size):
+        if total_size > 0:
+            pct = min(100, int(count * block_size * 100 / total_size))
+            mb_cur = (count * block_size) // (1024 * 1024)
+            mb_tot = total_size // (1024 * 1024)
+            sys.stderr.write(f"\r[alveria] Download progress: {pct}% ({mb_cur}MB / {mb_tot}MB)")
+            sys.stderr.flush()
+
+    try:
+        urllib.request.urlretrieve(url, tar_path, reporthook=_progress)
+        sys.stderr.write("\n[alveria] Mengekstrak binary...\n")
+        sys.stderr.flush()
+
+        with tarfile.open(tar_path, "r:gz") as tar:
+            tar.extractall(path=bin_dir)
+
+        if (bin_dir / "obscura").exists() and not target_bin.exists():
+            (bin_dir / "obscura").rename(target_bin)
+
+        if target_bin.exists():
+            try:
+                os.chmod(target_bin, 0o755)
+            except Exception:
+                pass
+        if (bin_dir / "obscura-worker").exists():
+            try:
+                os.chmod(bin_dir / "obscura-worker", 0o755)
+            except Exception:
+                pass
+
+        print(f"[alveria] Core engine siap digunakan di: {target_bin}\n", file=sys.stderr)
+    finally:
+        if tar_path.exists():
+            tar_path.unlink()
+
+    return target_bin
 
 
 # ---------------------------------------------------------------- Platform Fonts & Voices
@@ -593,7 +673,7 @@ class Alveria:
     # ---- lifecycle ----
     def start(self):
         if not CORE.exists():
-            raise FileNotFoundError(f"core tidak ada: {CORE}")
+            ensure_core()
         (HOME / "storage" / self.profile.name).mkdir(parents=True, exist_ok=True)
         (HOME / "logs").mkdir(parents=True, exist_ok=True)
 
@@ -863,8 +943,13 @@ def main():
     sv.add_argument("--proxy")
 
     sub.add_parser("profiles", help="list profil")
+    sub.add_parser("install", help="unduh otomatis core binary untuk arsitektur ini")
 
     a = ap.parse_args()
+
+    if a.cmd == "install":
+        ensure_core()
+        return 0
 
     if a.cmd == "profiles":
         for n, p in PROFILES.items():
