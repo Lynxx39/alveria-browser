@@ -1304,14 +1304,24 @@ class Alveria:
     def rss_mb(self) -> int:
         if not self.proc:
             return 0
+        total_kb = 0
+        pids = [self.proc.pid]
         try:
-            with open(f"/proc/{self.proc.pid}/status") as f:
-                for line in f:
-                    if line.startswith("VmRSS"):
-                        return int(line.split()[1]) // 1024
+            out = subprocess.run(["pgrep", "-P", str(self.proc.pid)], capture_output=True, text=True)
+            for cp in out.stdout.split():
+                if cp.isdigit():
+                    pids.append(int(cp))
         except Exception:
             pass
-        return 0
+        for pid in pids:
+            try:
+                with open(f"/proc/{pid}/status") as f:
+                    for line in f:
+                        if line.startswith("VmRSS:"):
+                            total_kb += int(line.split()[1])
+            except Exception:
+                pass
+        return max(1, total_kb // 1024) if total_kb else 0
 
     # ---- Workaround Helpers (Bug Obscura: No Long Async Evaluate) ----
     def poll_js(self, page, expr: str, timeout: float = 30, interval: float = 0.8) -> Any:
