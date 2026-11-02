@@ -69,6 +69,10 @@ Alveria injects zero-overhead native patches before any script executes on the p
 12. **Native Code Function Masking**: Every patched prototype method (`getContext`, `toDataURL`, `getImageData`, `getParameter`, `getChannelData`, `fonts.check`) is wrapped in Camoufox-style native function stringification (`function () { [native code] }`), defeating deep prototype inspection and wrapper leaks.
 13. **Camoufox-Aligned Firefox Profiles**: Support for native Firefox identities (Profiles 8–10 or `profile="firefox"`). When active, `window.chrome` and `navigator.userAgentData` are purged, `navigator.oscpu`, `navigator.buildID`, and `InstallTrigger` are populated, and `sec-ch-ua` headers are withheld to match real Gecko browser behavior.
 14. **Zero-Overhead GeoIP Auto-Matching (`geoip=True`)**: Automatically aligns timezone, locale, languages (`Accept-Language`), and Playwright GPS coordinates directly with the proxy IP using standard library HTTP APIs with thread-safe caching. Completely eliminates proxy-timezone mismatches with 0 KB memory overhead (no heavy MaxMind `.mmdb` databases).
+15. **Stack Trace Cloaking**: Masks `Error.prototype.stack` to purge all internal script wrapper frames, producing 100% genuine C++ native call stacks that defeat deep reflection inspection.
+16. **Synthetic WebGL `readPixels` & Valid Canvas Data**: Synthesizes deterministic RGBA pixel buffers on `gl.readPixels()` and valid PNG data URLs on WebGL canvases, passing WebGL image hash checks without needing 250 MB SwiftShader.
+17. **Desktop `mediaDevices` Spoofing**: Simulates genuine desktop audio/video input devices, closing the dead-giveaway empty device list (`[]`) of headless browsers.
+18. **Automated Turnstile Bridge (`auto_turnstile=True`)**: In `wait_settle()`, automatically detects Cloudflare Turnstile widgets, retrieves tokens via background solver, and injects them into the form seamlessly.
 
 ---
 
