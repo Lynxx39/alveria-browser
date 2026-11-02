@@ -213,6 +213,9 @@ TRACKER_DOMAINS = [
     "clarity.ms", "hotjar.com", "sentry.io", "browser.sentry-cdn.com",
     "connect.facebook.net", "facebook.com/tr", "analytics.tiktok.com",
     "fullstory.com", "segment.io", "cdn.segment.com", "intercom.io",
+    "doubleclick.net", "criteo.com", "adroll.com", "taboola.com", "outbrain.com",
+    "scorecardresearch.com", "quantserve.com", "adform.net", "amazon-adsystem.com",
+    "moatads.com", "adnxs.com", "app-measurement.com", "datadoghq-browser-agent.com",
 ]
 
 
@@ -619,6 +622,22 @@ def stealth_js(p: Profile, seed: int) -> str:
       return origToString.call(this);
     }};
     makeNative(Function.prototype.toString, 'toString');
+
+    // Stack Trace Cloaking (C++ Native execution trace emulation)
+    const origStackDesc = Object.getOwnPropertyDescriptor(Error.prototype, 'stack');
+    if (origStackDesc && origStackDesc.get) {{
+      Object.defineProperty(Error.prototype, 'stack', {{
+        get: makeNative(function () {{
+          const raw = origStackDesc.get.call(this);
+          if (typeof raw !== 'string') return raw;
+          const nl = String.fromCharCode(10);
+          return raw.split(nl).filter(line => !line.includes('makeNative') && !line.includes('__alveria') && !line.includes('stealth_js')).join(nl);
+        }}, 'get stack'),
+        set: origStackDesc.set,
+        configurable: true,
+        enumerable: false,
+      }});
+    }}
   }} catch (e) {{}}
 
   const def = (obj, prop, value) => {{
@@ -676,6 +695,22 @@ def stealth_js(p: Profile, seed: int) -> str:
   def(navigator, 'languages', {lang_json});
   def(navigator, 'maxTouchPoints', {1 if p.touch else 0});
 
+  // Media Devices Spoof (Camoufox alignment - closes empty devices headless tell)
+  const fakeDevices = [
+    {{ deviceId: '', kind: 'audioinput', label: '', groupId: '' }},
+    {{ deviceId: '', kind: 'videoinput', label: '', groupId: '' }},
+    {{ deviceId: '', kind: 'audiooutput', label: '', groupId: '' }},
+  ];
+  if (!navigator.mediaDevices) {{
+    navigator.mediaDevices = {{
+      enumerateDevices: makeNative(() => Promise.resolve(fakeDevices), 'enumerateDevices'),
+      addEventListener: () => {{}},
+      removeEventListener: () => {{}},
+    }};
+  }} else {{
+    navigator.mediaDevices.enumerateDevices = makeNative(() => Promise.resolve(fakeDevices), 'enumerateDevices');
+  }}
+
   // Screen & Taskbar Geometry (Camoufox math)
   const isWin = {json.dumps('win' in p.name.lower())};
   const isMac = {json.dumps('mac' in p.name.lower())};
@@ -689,6 +724,10 @@ def stealth_js(p: Profile, seed: int) -> str:
   def(window, 'devicePixelRatio', {p.device_scale});
   def(window, 'outerWidth', {p.screen[0]});
   def(window, 'outerHeight', {p.screen[1]});
+  def(window, 'screenX', 0);
+  def(window, 'screenY', 0);
+  def(window, 'screenLeft', 0);
+  def(window, 'screenTop', 0);
 
   const isFirefox = {json.dumps(getattr(p, 'browser_type', 'chrome') == 'firefox')};
   if (isFirefox) {{
@@ -861,8 +900,18 @@ def stealth_js(p: Profile, seed: int) -> str:
      'bufferData','useProgram','createProgram','createShader','shaderSource','compileShader',
      'attachShader','linkProgram','getAttribLocation','getUniformLocation','uniformMatrix4fv',
      'uniform1i','uniform1f','uniform3fv','activeTexture','bindTexture','texImage2D','texParameteri',
-     'generateMipmap','pixelStorei','blendFunc','depthFunc','scissor','finish','flush','readPixels',
+     'generateMipmap','pixelStorei','blendFunc','depthFunc','scissor','finish','flush',
     ].forEach(m => {{ gl[m] = noop; }});
+    gl.readPixels = makeNative((x, y, w, h, format, type, pixels) => {{
+      if (pixels && pixels.length) {{
+        for (let i = 0; i < pixels.length; i += 4) {{
+          pixels[i] = Math.floor(rnd() * 256);
+          pixels[i + 1] = Math.floor(rnd() * 256);
+          pixels[i + 2] = Math.floor(rnd() * 256);
+          pixels[i + 3] = 255;
+        }}
+      }}
+    }}, 'readPixels');
     gl.createBuffer = () => ({{}});
     gl.createTexture = () => ({{}});
     gl.getProgramParameter = () => true;
@@ -891,6 +940,19 @@ def stealth_js(p: Profile, seed: int) -> str:
       if (p === 37446 || p === 7937) return GL_RENDERER;
       return orig.call(this, p);
     }}, 'getParameter');
+    if (proto.readPixels) {{
+      const origRP = proto.readPixels;
+      proto.readPixels = makeNative(function (x, y, w, h, format, type, pixels) {{
+        origRP.call(this, x, y, w, h, format, type, pixels);
+        if (pixels && pixels.length > 0) {{
+          for (let i = 0; i < pixels.length; i += 64) {{
+            if (rnd() < 0.1) {{
+              pixels[i] = (pixels[i] + 1) % 256;
+            }}
+          }}
+        }}
+      }}, 'readPixels');
+    }}
   }};
   patchGL(window.WebGLRenderingContext && WebGLRenderingContext.prototype);
   patchGL(window.WebGL2RenderingContext && WebGL2RenderingContext.prototype);
@@ -920,6 +982,17 @@ def stealth_js(p: Profile, seed: int) -> str:
     const toDataURL = HTMLCanvasElement.prototype.toDataURL;
     HTMLCanvasElement.prototype.toDataURL = makeNative(function (...args) {{
       try {{
+        if (this.__alveria_gl) {{
+          const c2d = document.createElement('canvas');
+          c2d.width = Math.max(1, this.width || 300);
+          c2d.height = Math.max(1, this.height || 150);
+          const ctx2d = c2d.getContext('2d');
+          if (ctx2d) {{
+            ctx2d.fillStyle = `rgb(${{Math.floor(rnd() * 255)}}, ${{Math.floor(rnd() * 255)}}, ${{Math.floor(rnd() * 255)}})`;
+            ctx2d.fillRect(0, 0, c2d.width, c2d.height);
+            return toDataURL.apply(c2d, args);
+          }}
+        }}
         const ctx = this.getContext('2d');
         if (ctx && this.width && this.height) {{
           const img = ctx.getImageData(0, 0, this.width, this.height);
@@ -1082,6 +1155,7 @@ def generate_bezier_path(start: Tuple[float, float], end: Tuple[float, float],
 class Alveria:
     def __init__(self, profile: int | str = 1, port: int = DEFAULT_PORT,
                  proxy: str | None = None, geoip: bool = False,
+                 auto_turnstile: bool = True,
                  headless: bool = True, block_trackers: bool = True,
                  block_images: bool = False, block_fonts: bool = False,
                  extra_env: dict | None = None, log: bool = True):
@@ -1089,6 +1163,7 @@ class Alveria:
         self.block_fonts = block_fonts
         self.log_enabled = log
         self.geoip_enabled = geoip
+        self.auto_turnstile = auto_turnstile
         self.geo: dict | None = None
         self.port = port
         self.proxy = proxy
@@ -1263,6 +1338,21 @@ class Alveria:
     def wait_settle(self, page, seconds: float = 15):
         """Tunggu SPA hydrate. Obscura butuh 15-20s untuk app React berat."""
         page.wait_for_timeout(int(seconds * 1000))
+        if self.auto_turnstile:
+            self._check_and_auto_solve_turnstile(page)
+
+    def _check_and_auto_solve_turnstile(self, page):
+        """Otomatis deteksi dan selesaikan Turnstile jika ada widget di DOM."""
+        try:
+            has_turnstile = page.evaluate("""() => {
+              const el = document.querySelector('[data-sitekey], input[name="cf-turnstile-response"], .cf-turnstile');
+              if (el) return true;
+              return Array.from(document.querySelectorAll('script')).some(s => (s.src || '').includes('challenges.cloudflare.com'));
+            }""")
+            if has_turnstile:
+                self.solve_and_inject_turnstile(page)
+        except Exception:
+            pass
 
     def smart_wait(self, page, timeout: float = 30, stable_checks: int = 3) -> bool:
         """Smart wait tanpa hardcoded sleep: mendeteksi DOM stability & readyState."""
