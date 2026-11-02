@@ -604,13 +604,21 @@ def stealth_js(p: Profile, seed: int) -> str:
   const isFirefox = {json.dumps(getattr(p, 'browser_type', 'chrome') == 'firefox')};
   if (isFirefox) {{
     // Firefox Identity Disambiguation (Camoufox alignment)
-    try {{ delete window.chrome; }} catch (e) {{}}
-    try {{ delete window.loadTimes; }} catch (e) {{}}
-    try {{ delete window.csi; }} catch (e) {{}}
-    try {{ delete navigator.userAgentData; }} catch (e) {{}}
+    try {{
+      delete globalThis.chrome;
+      delete window.chrome;
+      delete window.loadTimes;
+      delete window.csi;
+    }} catch (e) {{}}
+    try {{
+      delete navigator.userAgentData;
+      delete Navigator.prototype.userAgentData;
+    }} catch (e) {{}}
+    try {{ delete navigator.vendor; }} catch (e) {{}}
     def(navigator, 'vendor', '');
     def(navigator, 'product', 'Gecko');
     def(navigator, 'productSub', '20100101');
+    try {{ delete navigator.oscpu; }} catch (e) {{}}
     def(navigator, 'oscpu', {json.dumps(p.oscpu or ('Windows NT 10.0; Win64; x64' if 'win' in p.name else 'Linux x86_64'))});
     def(navigator, 'buildID', {json.dumps(p.build_id)});
     def(navigator, 'pdfViewerEnabled', true);
@@ -784,7 +792,7 @@ def stealth_js(p: Profile, seed: int) -> str:
       return this.__alveria_gl;
     }}
     return origGetContext.call(this, type, ...args);
-  }};
+  }}, 'getContext');
 
   const patchGL = (proto) => {{
     if (!proto) return;
@@ -793,7 +801,7 @@ def stealth_js(p: Profile, seed: int) -> str:
       if (p === 37445 || p === 7936) return GL_VENDOR;
       if (p === 37446 || p === 7937) return GL_RENDERER;
       return orig.call(this, p);
-    }};
+    }}, 'getParameter');
   }};
   patchGL(window.WebGLRenderingContext && WebGLRenderingContext.prototype);
   patchGL(window.WebGL2RenderingContext && WebGL2RenderingContext.prototype);
@@ -816,7 +824,7 @@ def stealth_js(p: Profile, seed: int) -> str:
         }}
         return img;
       }} catch (e) {{ return orig.apply(this, args); }}
-    }};
+    }}, name);
   }};
   noiseCanvas(window.CanvasRenderingContext2D && CanvasRenderingContext2D.prototype, 'getImageData');
   if (window.HTMLCanvasElement) {{
@@ -833,7 +841,7 @@ def stealth_js(p: Profile, seed: int) -> str:
         }}
       }} catch (e) {{}}
       return toDataURL.apply(this, args);
-    }};
+    }}, 'toDataURL');
   }}
 
   // =========================================================================
@@ -851,7 +859,7 @@ def stealth_js(p: Profile, seed: int) -> str:
         }}
       }}
       return data;
-    }};
+    }}, 'getChannelData');
   }}
   if (window.AnalyserNode && AnalyserNode.prototype.getFloatFrequencyData) {{
     const origGetFloatFreq = AnalyserNode.prototype.getFloatFrequencyData;
@@ -864,7 +872,7 @@ def stealth_js(p: Profile, seed: int) -> str:
           }}
         }}
       }}
-    }};
+    }}, 'getFloatFrequencyData');
   }}
 
   // =========================================================================
@@ -882,7 +890,7 @@ def stealth_js(p: Profile, seed: int) -> str:
         }}
       }}
       return origCheck(font, text);
-    }};
+    }}, 'check');
   }}
 
   // =========================================================================
@@ -908,7 +916,7 @@ def stealth_js(p: Profile, seed: int) -> str:
         return Promise.resolve({{ state: 'prompt', onchange: null }});
       }}
       return oq(params);
-    }};
+    }}, 'query');
   }}
 
   // =========================================================================
