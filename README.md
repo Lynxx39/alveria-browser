@@ -65,7 +65,9 @@ Alveria injects zero-overhead native patches before any script executes on the p
 8. **WebRTC IP Shield**: Blocks internal IP leakage by filtering `RTCPeerConnection` ice servers and stripping host candidates.
 9. **Tracker & Analytics Blocker**: Automatically drops connections to resource-heavy telemetry (Google Analytics, Clarity, Hotjar, Sentry, Facebook/TikTok pixels) saving bandwidth and keeping RAM usage minimal.
 10. **Client Hints Synchronization**: Bridges both the network layer (`Sec-CH-UA`, `Sec-CH-UA-Platform`, `Sec-CH-UA-Mobile`) and the JavaScript API (`navigator.userAgentData` with `getHighEntropyValues()`), ensuring Cloudflare and enterprise WAFs observe 100% matched signals.
-11. **Procedural Profile Generator**: Support for `profile="random"` generates mathematically coherent identities (screen, GPU model, cores, memory, OS) on the fly, preventing device repetition across large scraping fleets.
+11. **Procedural Profile Generator**: Support for `profile="random"`, `profile="random-chrome"`, or `profile="random-firefox"` generates mathematically coherent identities (screen, GPU model, cores, memory, OS) on the fly, preventing device repetition across large scraping fleets.
+12. **Native Code Function Masking**: Every patched prototype method (`getContext`, `toDataURL`, `getImageData`, `getParameter`, `getChannelData`, `fonts.check`) is wrapped in Camoufox-style native function stringification (`function () { [native code] }`), defeating deep prototype inspection and wrapper leaks.
+13. **Camoufox-Aligned Firefox Profiles**: Support for native Firefox identities (Profiles 8–10 or `profile="firefox"`). When active, `window.chrome` and `navigator.userAgentData` are purged, `navigator.oscpu`, `navigator.buildID`, and `InstallTrigger` are populated, and `sec-ch-ua` headers are withheld to match real Gecko browser behavior.
 
 ---
 

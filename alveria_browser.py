@@ -235,6 +235,9 @@ class Profile:
     touch: bool = False
     fonts: list[str] = field(default_factory=lambda: WINDOWS_FONTS)
     voices: list[dict] = field(default_factory=lambda: WINDOWS_VOICES)
+    browser_type: str = "chrome"    # "chrome" or "firefox"
+    oscpu: str = ""
+    build_id: str = "20250113170000"
 
     @property
     def chrome_major(self) -> str:
@@ -269,6 +272,15 @@ class Profile:
         return "6.5.0"
 
     def client_hints(self) -> dict[str, str]:
+        if getattr(self, "browser_type", "chrome") == "firefox":
+            return {
+                "Accept-Language": f"{self.locale},en;q=0.9",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
+            }
         major = self.chrome_major
         return {
             "sec-ch-ua": f'"Chromium";v="{major}", "Not=A?Brand";v="24", "Google Chrome";v="{major}"',
@@ -293,6 +305,18 @@ def _linux(ver: str) -> str:
             f"(KHTML, like Gecko) Chrome/{ver}.0.0.0 Safari/537.36")
 
 
+def _win_ff(ver: str = "135") -> str:
+    return f"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:{ver}.0) Gecko/20100101 Firefox/{ver}.0"
+
+
+def _mac_ff(ver: str = "135") -> str:
+    return f"Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:{ver}.0) Gecko/20100101 Firefox/{ver}.0"
+
+
+def _linux_ff(ver: str = "135") -> str:
+    return f"Mozilla/5.0 (X11; Linux x86_64; rv:{ver}.0) Gecko/20100101 Firefox/{ver}.0"
+
+
 PROFILES: dict[int, Profile] = {
     1: Profile("win10-intel-hd", _win("145"), "Win32", "Google Inc.", 8, 8,
                "Google Inc. (Intel)", "ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)",
@@ -315,13 +339,96 @@ PROFILES: dict[int, Profile] = {
     7: Profile("linux-ubuntu-iris", _linux("145"), "Linux x86_64", "Google Inc.", 8, 16,
                "Google Inc. (Intel)", "ANGLE (Intel, Mesa Intel(R) Iris(R) Xe Graphics (TGL GT2), OpenGL 4.6)",
                "Asia/Jakarta", "en-US", fonts=LINUX_FONTS, voices=WINDOWS_VOICES),
+    8: Profile("win10-firefox", _win_ff("135"), "Win32", "", 8, 8,
+               "Google Inc. (Intel)", "ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+               "Asia/Jakarta", "en-US", fonts=WINDOWS_FONTS, voices=WINDOWS_VOICES,
+               browser_type="firefox", oscpu="Windows NT 10.0; Win64; x64"),
+    9: Profile("linux-firefox", _linux_ff("135"), "Linux x86_64", "", 8, 16,
+               "Mesa", "Mesa Intel(R) UHD Graphics 630 (CFL GT2)",
+               "Asia/Jakarta", "en-US", fonts=LINUX_FONTS, voices=WINDOWS_VOICES,
+               browser_type="firefox", oscpu="Linux x86_64"),
+    10: Profile("mac-firefox", _mac_ff("135"), "MacIntel", "", 10, 16,
+                "Apple", "Apple M2",
+                "Asia/Jakarta", "en-US", screen=(1440, 900), device_scale=2.0, fonts=MAC_FONTS, voices=MAC_VOICES,
+                browser_type="firefox", oscpu="Intel Mac OS X 10.15"),
 }
 
 
-def create_random_profile(seed: Optional[int] = None) -> Profile:
-    """Generate realistic plausible random profile (Windows/macOS/Linux)."""
+def create_random_profile(seed: Optional[int] = None, browser: str = "random") -> Profile:
+    """Generate realistic plausible random profile (Chrome / Firefox on Windows/macOS/Linux)."""
     rng = random.Random(seed)
+    if browser == "firefox" or (browser == "random" and rng.random() < 0.35):
+        is_ff = True
+    else:
+        is_ff = False
+
     os_type = rng.choices(["win", "mac", "linux"], weights=[70, 20, 10])[0]
+
+    if is_ff:
+        ff_ver = rng.choice(["133", "134", "135", "136"])
+        if os_type == "win":
+            gpu = rng.choice([
+                ("Google Inc. (Intel)", "ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)", (1920, 1080), 8, 8),
+                ("Google Inc. (NVIDIA)", "ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 Direct3D11 vs_5_0 ps_5_0, D3D11)", (1920, 1080), 8, 16),
+                ("Google Inc. (AMD)", "ANGLE (AMD, AMD Radeon RX 6600 Direct3D11 vs_5_0 ps_5_0, D3D11)", (2560, 1440), 12, 16),
+            ])
+            return Profile(
+                name=f"win-ff-rand-{rng.randint(100, 999)}",
+                ua=_win_ff(ff_ver),
+                platform="Win32",
+                vendor="",
+                cores=gpu[3],
+                memory=gpu[4],
+                webgl_vendor=gpu[0],
+                webgl_renderer=gpu[1],
+                timezone="Asia/Jakarta",
+                locale="en-US",
+                screen=gpu[2],
+                device_scale=1.0,
+                fonts=WINDOWS_FONTS,
+                voices=WINDOWS_VOICES,
+                browser_type="firefox",
+                oscpu="Windows NT 10.0; Win64; x64",
+            )
+        elif os_type == "mac":
+            return Profile(
+                name=f"mac-ff-rand-{rng.randint(100, 999)}",
+                ua=_mac_ff(ff_ver),
+                platform="MacIntel",
+                vendor="",
+                cores=10,
+                memory=16,
+                webgl_vendor="Apple",
+                webgl_renderer="Apple M2",
+                timezone="Asia/Jakarta",
+                locale="en-US",
+                screen=(1440, 900),
+                device_scale=2.0,
+                fonts=MAC_FONTS,
+                voices=MAC_VOICES,
+                browser_type="firefox",
+                oscpu="Intel Mac OS X 10.15",
+            )
+        else:
+            return Profile(
+                name=f"linux-ff-rand-{rng.randint(100, 999)}",
+                ua=_linux_ff(ff_ver),
+                platform="Linux x86_64",
+                vendor="",
+                cores=8,
+                memory=16,
+                webgl_vendor="Mesa",
+                webgl_renderer="Mesa Intel(R) UHD Graphics 630 (CFL GT2)",
+                timezone="Asia/Jakarta",
+                locale="en-US",
+                screen=(1920, 1080),
+                device_scale=1.0,
+                fonts=LINUX_FONTS,
+                voices=WINDOWS_VOICES,
+                browser_type="firefox",
+                oscpu="Linux x86_64",
+            )
+
     ver = rng.choice(["143", "144", "145", "146"])
 
     if os_type == "win":
@@ -401,15 +508,40 @@ def stealth_js(p: Profile, seed: int) -> str:
   let s = SEED >>> 0;
   const rnd = () => {{ s ^= s << 13; s >>>= 0; s ^= s >> 17; s ^= s << 5; s >>>= 0; return s / 4294967296; }};
 
+  // =========================================================================
+  // NATIVE CODE MASKING ([native code] à la Camoufox)
+  // =========================================================================
+  const origToString = Function.prototype.toString;
+  const nativeFns = new WeakSet();
+  const nativeNames = new WeakMap();
+
+  const makeNative = (fn, name) => {{
+    if (typeof fn !== 'function') return fn;
+    nativeFns.add(fn);
+    if (name) nativeNames.set(fn, name);
+    return fn;
+  }};
+
+  try {{
+    Function.prototype.toString = function () {{
+      if (nativeFns.has(this)) {{
+        const name = nativeNames.get(this) || this.name || '';
+        return `function ${{name}}() {{ [native code] }}`;
+      }}
+      return origToString.call(this);
+    }};
+    makeNative(Function.prototype.toString, 'toString');
+  }} catch (e) {{}}
+
   const def = (obj, prop, value) => {{
-    try {{ Object.defineProperty(obj, prop, {{ get: () => value, configurable: true }}); }} catch (e) {{}}
+    try {{ Object.defineProperty(obj, prop, {{ get: () => value, configurable: true, enumerable: true }}); }} catch (e) {{}}
   }};
 
   // =========================================================================
   // 0. DOM RUNTIME ENVIRONMENT STUBS (Aliyun, DataDome, Cloudflare polyfills)
   // =========================================================================
   ['moveBy', 'moveTo', 'resizeBy', 'resizeTo'].forEach(fn => {{
-    if (typeof window[fn] === 'undefined') window[fn] = () => {{}};
+    if (typeof window[fn] === 'undefined') window[fn] = makeNative(() => {{}}, fn);
   }});
 
   if (typeof window.Location === 'undefined') {{
@@ -454,6 +586,52 @@ def stealth_js(p: Profile, seed: int) -> str:
   def(navigator, 'deviceMemory', {p.memory});
   def(navigator, 'languages', {lang_json});
   def(navigator, 'maxTouchPoints', {1 if p.touch else 0});
+
+  // Screen & Taskbar Geometry (Camoufox math)
+  const isWin = {json.dumps('win' in p.name.lower())};
+  const isMac = {json.dumps('mac' in p.name.lower())};
+  const taskbarH = isWin ? 40 : (isMac ? 25 : 0);
+  def(screen, 'availHeight', {p.screen[1]} - taskbarH);
+  def(screen, 'availWidth', {p.screen[0]});
+  def(screen, 'availTop', isMac ? 25 : 0);
+  def(screen, 'availLeft', 0);
+  def(screen, 'colorDepth', 24);
+  def(screen, 'pixelDepth', 24);
+  def(window, 'devicePixelRatio', {p.device_scale});
+  def(window, 'outerWidth', {p.screen[0]});
+  def(window, 'outerHeight', {p.screen[1]});
+
+  const isFirefox = {json.dumps(getattr(p, 'browser_type', 'chrome') == 'firefox')};
+  if (isFirefox) {{
+    // Firefox Identity Disambiguation (Camoufox alignment)
+    try {{ delete window.chrome; }} catch (e) {{}}
+    try {{ delete window.loadTimes; }} catch (e) {{}}
+    try {{ delete window.csi; }} catch (e) {{}}
+    try {{ delete navigator.userAgentData; }} catch (e) {{}}
+    def(navigator, 'vendor', '');
+    def(navigator, 'product', 'Gecko');
+    def(navigator, 'productSub', '20100101');
+    def(navigator, 'oscpu', {json.dumps(p.oscpu or ('Windows NT 10.0; Win64; x64' if 'win' in p.name else 'Linux x86_64'))});
+    def(navigator, 'buildID', {json.dumps(p.build_id)});
+    def(navigator, 'pdfViewerEnabled', true);
+    window.InstallTrigger = {{ install: makeNative(() => {{}}, 'install') }};
+
+    const ffPlugins = [
+      {{ name: 'PDF Viewer', filename: 'pdf.js', description: 'Portable Document Format' }}
+    ];
+    const ffPluginArray = Object.create(PluginArray.prototype);
+    ffPlugins.forEach((pl, i) => {{
+      const plugin = Object.create(Plugin.prototype);
+      def(plugin, 'name', pl.name);
+      def(plugin, 'filename', pl.filename);
+      def(plugin, 'description', pl.description);
+      def(plugin, 'length', 1);
+      ffPluginArray[i] = plugin;
+    }});
+    def(ffPluginArray, 'length', ffPlugins.length);
+    def(navigator, 'plugins', ffPluginArray);
+    def(navigator, 'mimeTypes', Object.create(MimeTypeArray.prototype));
+  }} else {{
 
   // =========================================================================
   // 1.1 CLIENT HINTS JAVASCRIPT API (navigator.userAgentData)
@@ -516,7 +694,7 @@ def stealth_js(p: Profile, seed: int) -> str:
       addEventListener: () => {{}},
       removeEventListener: () => {{}},
     }};
-    navigator.getBattery = () => Promise.resolve(fakeBattery);
+    navigator.getBattery = makeNative(() => Promise.resolve(fakeBattery), 'getBattery');
   }}
 
   // Plugins & MimeTypes
@@ -550,6 +728,7 @@ def stealth_js(p: Profile, seed: int) -> str:
     window.chrome.csi = () => ({{ startE: Date.now(), onloadT: Date.now(), pageT: rnd() * 1000, tran: 15 }});
   }}
   window.chrome.app = window.chrome.app || {{ isInstalled: false }};
+  }}
 
   // =========================================================================
   // 3. WEBGL CONTEXT STUB & UNMASKED VENDOR/RENDERER
@@ -596,7 +775,7 @@ def stealth_js(p: Profile, seed: int) -> str:
     return gl;
   }};
   const origGetContext = HTMLCanvasElement.prototype.getContext;
-  HTMLCanvasElement.prototype.getContext = function (type, ...args) {{
+  HTMLCanvasElement.prototype.getContext = makeNative(function (type, ...args) {{
     if (type === 'webgl' || type === 'experimental-webgl' || type === 'webgl2') {{
       const real = (() => {{ try {{ return origGetContext.call(this, type, ...args); }} catch (e) {{ return null; }} }})();
       if (real) return real;
@@ -610,7 +789,7 @@ def stealth_js(p: Profile, seed: int) -> str:
   const patchGL = (proto) => {{
     if (!proto) return;
     const orig = proto.getParameter;
-    proto.getParameter = function (p) {{
+    proto.getParameter = makeNative(function (p) {{
       if (p === 37445 || p === 7936) return GL_VENDOR;
       if (p === 37446 || p === 7937) return GL_RENDERER;
       return orig.call(this, p);
@@ -625,7 +804,7 @@ def stealth_js(p: Profile, seed: int) -> str:
   const noiseCanvas = (proto, name) => {{
     if (!proto) return;
     const orig = proto[name];
-    proto[name] = function (...args) {{
+    proto[name] = makeNative(function (...args) {{
       const ctx = this;
       try {{
         const img = orig.apply(this, args);
@@ -642,7 +821,7 @@ def stealth_js(p: Profile, seed: int) -> str:
   noiseCanvas(window.CanvasRenderingContext2D && CanvasRenderingContext2D.prototype, 'getImageData');
   if (window.HTMLCanvasElement) {{
     const toDataURL = HTMLCanvasElement.prototype.toDataURL;
-    HTMLCanvasElement.prototype.toDataURL = function (...args) {{
+    HTMLCanvasElement.prototype.toDataURL = makeNative(function (...args) {{
       try {{
         const ctx = this.getContext('2d');
         if (ctx && this.width && this.height) {{
@@ -662,7 +841,7 @@ def stealth_js(p: Profile, seed: int) -> str:
   // =========================================================================
   if (window.AudioBuffer && AudioBuffer.prototype.getChannelData) {{
     const origGetChannelData = AudioBuffer.prototype.getChannelData;
-    AudioBuffer.prototype.getChannelData = function (channel) {{
+    AudioBuffer.prototype.getChannelData = makeNative(function (channel) {{
       const data = origGetChannelData.call(this, channel);
       if (data && data.length > 0) {{
         for (let i = 0; i < data.length; i += 128) {{
@@ -676,7 +855,7 @@ def stealth_js(p: Profile, seed: int) -> str:
   }}
   if (window.AnalyserNode && AnalyserNode.prototype.getFloatFrequencyData) {{
     const origGetFloatFreq = AnalyserNode.prototype.getFloatFrequencyData;
-    AnalyserNode.prototype.getFloatFrequencyData = function (array) {{
+    AnalyserNode.prototype.getFloatFrequencyData = makeNative(function (array) {{
       origGetFloatFreq.call(this, array);
       if (array && array.length > 0) {{
         for (let i = 0; i < array.length; i += 16) {{
@@ -694,7 +873,7 @@ def stealth_js(p: Profile, seed: int) -> str:
   const allowedFonts = new Set({fonts_json});
   if (document.fonts && document.fonts.check) {{
     const origCheck = document.fonts.check.bind(document.fonts);
-    document.fonts.check = function (font, text) {{
+    document.fonts.check = makeNative(function (font, text) {{
       if (typeof font === 'string') {{
         const match = font.match(/(?:['"])(.*?)(?:['"])|(?:[0-9]+(?:px|pt|em)\\s+([a-zA-Z\\s-]+))/);
         const name = match ? (match[1] || match[2]).trim() : font.trim();
@@ -711,7 +890,7 @@ def stealth_js(p: Profile, seed: int) -> str:
   // =========================================================================
   const platformVoices = {voices_json};
   if (window.speechSynthesis) {{
-    window.speechSynthesis.getVoices = () => platformVoices;
+    window.speechSynthesis.getVoices = makeNative(() => platformVoices, 'getVoices');
   }}
 
   // =========================================================================
@@ -722,7 +901,7 @@ def stealth_js(p: Profile, seed: int) -> str:
   }}
   if (navigator.permissions && navigator.permissions.query) {{
     const oq = navigator.permissions.query.bind(navigator.permissions);
-    navigator.permissions.query = (params) => {{
+    navigator.permissions.query = makeNative((params) => {{
       if (!params || !params.name) return oq(params);
       if (params.name === 'notifications') return Promise.resolve({{ state: 'default', onchange: null }});
       if (params.name === 'geolocation' || params.name === 'camera' || params.name === 'microphone') {{
@@ -811,9 +990,12 @@ class Alveria:
                  log: bool = True):
         self.block_images = block_images
         self.block_fonts = block_fonts
-        if profile == "random":
-            self.profile = create_random_profile()
+        if profile in ("random", "random-chrome"):
+            self.profile = create_random_profile(browser="chrome")
             self.profile_num = 1 if "win" in self.profile.name else (4 if "mac" in self.profile.name else 7)
+        elif profile in ("firefox", "random-firefox"):
+            self.profile = create_random_profile(browser="firefox")
+            self.profile_num = 8 if "win" in self.profile.name else (10 if "mac" in self.profile.name else 9)
         elif isinstance(profile, int) and profile in PROFILES:
             self.profile = PROFILES[profile]
             self.profile_num = profile
