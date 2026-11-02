@@ -406,6 +406,34 @@ def stealth_js(p: Profile, seed: int) -> str:
   }};
 
   // =========================================================================
+  // 0. DOM RUNTIME ENVIRONMENT STUBS (Aliyun, DataDome, Cloudflare polyfills)
+  // =========================================================================
+  ['moveBy', 'moveTo', 'resizeBy', 'resizeTo'].forEach(fn => {{
+    if (typeof window[fn] === 'undefined') window[fn] = () => {{}};
+  }});
+
+  if (typeof window.Location === 'undefined') {{
+    try {{
+      window.Location = function Location() {{}};
+      Object.defineProperty(window.Location, 'prototype', {{ value: Object.getPrototypeOf(window.location) || {{}} }});
+    }} catch (e) {{}}
+  }}
+
+  const missingGlobals = [
+    'TouchEvent', 'DragEvent', 'PageTransitionEvent', 'PointerEvent',
+    'MediaSource', 'SourceBuffer', 'SpeechSynthesisUtterance'
+  ];
+  missingGlobals.forEach(name => {{
+    if (typeof window[name] === 'undefined') {{
+      try {{
+        const dummy = function () {{}};
+        dummy.prototype = {{}};
+        window[name] = dummy;
+      }} catch (e) {{}}
+    }}
+  }});
+
+  // =========================================================================
   // 1. NAVIGATOR PROPERTIES & WEBDRIVER PURGE
   // =========================================================================
   try {{ delete navigator.webdriver; }} catch (e) {{}}
