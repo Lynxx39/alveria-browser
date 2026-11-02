@@ -68,6 +68,7 @@ Alveria injects zero-overhead native patches before any script executes on the p
 11. **Procedural Profile Generator**: Support for `profile="random"`, `profile="random-chrome"`, or `profile="random-firefox"` generates mathematically coherent identities (screen, GPU model, cores, memory, OS) on the fly, preventing device repetition across large scraping fleets.
 12. **Native Code Function Masking**: Every patched prototype method (`getContext`, `toDataURL`, `getImageData`, `getParameter`, `getChannelData`, `fonts.check`) is wrapped in Camoufox-style native function stringification (`function () { [native code] }`), defeating deep prototype inspection and wrapper leaks.
 13. **Camoufox-Aligned Firefox Profiles**: Support for native Firefox identities (Profiles 8–10 or `profile="firefox"`). When active, `window.chrome` and `navigator.userAgentData` are purged, `navigator.oscpu`, `navigator.buildID`, and `InstallTrigger` are populated, and `sec-ch-ua` headers are withheld to match real Gecko browser behavior.
+14. **Zero-Overhead GeoIP Auto-Matching (`geoip=True`)**: Automatically aligns timezone, locale, languages (`Accept-Language`), and Playwright GPS coordinates directly with the proxy IP using standard library HTTP APIs with thread-safe caching. Completely eliminates proxy-timezone mismatches with 0 KB memory overhead (no heavy MaxMind `.mmdb` databases).
 
 ---
 
@@ -154,7 +155,11 @@ Every profile synchronizes User-Agent, platform, hardwareConcurrency, deviceMemo
 | **5** | `macbook-air-m2` | MacIntel | 8 | 8 GB | 1440×900 @2x | Asia/Jakarta |
 | **6** | `win10-lowend` | Win32 | 4 | 4 GB | 1366×768 | Asia/Jakarta |
 | **7** | `linux-ubuntu-iris` | Linux x86_64 | 8 | 16 GB | 1920×1080 | Asia/Jakarta |
-| **`random`** | `procedural-random` | Dynamic (Win/Mac/Linux) | 4–16 | 8–16 GB | Matched | Asia/Jakarta |
+| **8** | `win10-firefox` | Win32 (Gecko) | 8 | 16 GB | 1920×1080 | Asia/Jakarta |
+| **9** | `linux-firefox` | Linux x86_64 (Gecko) | 8 | 16 GB | 1920×1080 | Asia/Jakarta |
+| **10** | `mac-firefox` | MacIntel (Gecko) | 8 | 16 GB | 1440×900 @2x | Asia/Jakarta |
+| **`random`** | `procedural-random` | Dynamic (Win/Mac/Linux) | 4–16 | 8–16 GB | Matched | Dynamic / GeoIP |
+| **`firefox`** | `procedural-firefox` | Dynamic Firefox (Gecko) | 4–16 | 8–16 GB | Matched | Dynamic / GeoIP |
 
 ---
 

@@ -55,6 +55,7 @@ Python API:
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import math
 import re
@@ -63,6 +64,7 @@ import random
 import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from dataclasses import dataclass, field
@@ -213,6 +215,92 @@ TRACKER_DOMAINS = [
     "fullstory.com", "segment.io", "cdn.segment.com", "intercom.io",
 ]
 
+
+
+# ---------------------------------------------------------------- GeoIP & Country Mappings (Camoufox alignment)
+COUNTRY_LOCALES: dict[str, tuple[str, list[str]]] = {
+    "US": ("en-US", ["en-US", "en"]),
+    "GB": ("en-GB", ["en-GB", "en-US", "en"]),
+    "ID": ("id-ID", ["id-ID", "id", "en-US", "en"]),
+    "SG": ("en-SG", ["en-SG", "en", "zh-SG"]),
+    "DE": ("de-DE", ["de-DE", "de", "en-US", "en"]),
+    "FR": ("fr-FR", ["fr-FR", "fr", "en-US", "en"]),
+    "JP": ("ja-JP", ["ja-JP", "ja", "en-US", "en"]),
+    "KR": ("ko-KR", ["ko-KR", "ko", "en-US", "en"]),
+    "CN": ("zh-CN", ["zh-CN", "zh", "en-US", "en"]),
+    "IN": ("en-IN", ["en-IN", "en-US", "en", "hi-IN"]),
+    "AU": ("en-AU", ["en-AU", "en-US", "en"]),
+    "CA": ("en-CA", ["en-CA", "en-US", "en", "fr-CA"]),
+    "NL": ("nl-NL", ["nl-NL", "nl", "en-US", "en"]),
+    "BR": ("pt-BR", ["pt-BR", "pt", "en-US", "en"]),
+    "ES": ("es-ES", ["es-ES", "es", "en-US", "en"]),
+    "IT": ("it-IT", ["it-IT", "it", "en-US", "en"]),
+    "RU": ("ru-RU", ["ru-RU", "ru", "en-US", "en"]),
+    "TH": ("th-TH", ["th-TH", "th", "en-US", "en"]),
+    "VN": ("vi-VN", ["vi-VN", "vi", "en-US", "en"]),
+    "MY": ("ms-MY", ["ms-MY", "ms", "en-US", "en"]),
+    "PH": ("en-PH", ["en-PH", "fil-PH", "en"]),
+}
+
+_GEO_CACHE: dict[str, dict] = {}
+_GEO_LOCK = threading.Lock()
+
+
+def resolve_geoip(proxy: str | None = None, timeout: float = 4.0) -> dict | None:
+    """Resolve IP, country, timezone, locale & coordinates given an IP or proxy."""
+    cache_key = proxy or "direct"
+    with _GEO_LOCK:
+        if cache_key in _GEO_CACHE:
+            return _GEO_CACHE[cache_key]
+
+    urls = [
+        ("http://ip-api.com/json/", lambda d: {
+            "ip": d.get("query"),
+            "country": d.get("countryCode"),
+            "timezone": d.get("timezone"),
+            "lat": d.get("lat"),
+            "lon": d.get("lon"),
+            "city": d.get("city"),
+        }),
+        ("https://ipwho.is/", lambda d: {
+            "ip": d.get("ip"),
+            "country": d.get("country_code"),
+            "timezone": d.get("timezone", {}).get("id"),
+            "lat": d.get("latitude"),
+            "lon": d.get("longitude"),
+            "city": d.get("city"),
+        }),
+    ]
+
+    opener = None
+    if proxy:
+        px = proxy if "://" in proxy else f"http://{proxy}"
+        try:
+            handler = urllib.request.ProxyHandler({"http": px, "https": px})
+            opener = urllib.request.build_opener(handler)
+        except Exception:
+            opener = None
+    if not opener:
+        opener = urllib.request.build_opener()
+
+    for url, parser in urls:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+            with opener.open(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8", errors="ignore"))
+                res = parser(data)
+                if res.get("timezone"):
+                    country = (res.get("country") or "US").upper()
+                    locale, langs = COUNTRY_LOCALES.get(country, ("en-US", ["en-US", "en"]))
+                    res["locale"] = locale
+                    res["languages"] = langs
+                    with _GEO_LOCK:
+                        _GEO_CACHE[cache_key] = res
+                    return res
+        except Exception:
+            continue
+
+    return None
 
 # ---------------------------------------------------------------- Profiles
 @dataclass
@@ -584,6 +672,7 @@ def stealth_js(p: Profile, seed: int) -> str:
   def(navigator, 'vendor', {json.dumps(p.vendor)});
   def(navigator, 'hardwareConcurrency', {p.cores});
   def(navigator, 'deviceMemory', {p.memory});
+  def(navigator, 'language', {json.dumps(p.locale)});
   def(navigator, 'languages', {lang_json});
   def(navigator, 'maxTouchPoints', {1 if p.touch else 0});
 
@@ -992,12 +1081,18 @@ def generate_bezier_path(start: Tuple[float, float], end: Tuple[float, float],
 # ---------------------------------------------------------------- Core Class
 class Alveria:
     def __init__(self, profile: int | str = 1, port: int = DEFAULT_PORT,
-                 proxy: str | None = None, headless: bool = True,
-                 block_trackers: bool = True, block_images: bool = False,
-                 block_fonts: bool = False, extra_env: dict | None = None,
-                 log: bool = True):
+                 proxy: str | None = None, geoip: bool = False,
+                 headless: bool = True, block_trackers: bool = True,
+                 block_images: bool = False, block_fonts: bool = False,
+                 extra_env: dict | None = None, log: bool = True):
         self.block_images = block_images
         self.block_fonts = block_fonts
+        self.log_enabled = log
+        self.geoip_enabled = geoip
+        self.geo: dict | None = None
+        self.port = port
+        self.proxy = proxy
+
         if profile in ("random", "random-chrome"):
             self.profile = create_random_profile(browser="chrome")
             self.profile_num = 1 if "win" in self.profile.name else (4 if "mac" in self.profile.name else 7)
@@ -1005,20 +1100,26 @@ class Alveria:
             self.profile = create_random_profile(browser="firefox")
             self.profile_num = 8 if "win" in self.profile.name else (10 if "mac" in self.profile.name else 9)
         elif isinstance(profile, int) and profile in PROFILES:
-            self.profile = PROFILES[profile]
+            self.profile = copy.deepcopy(PROFILES[profile])
             self.profile_num = profile
         elif isinstance(profile, str) and profile.isdigit() and int(profile) in PROFILES:
-            self.profile = PROFILES[int(profile)]
+            self.profile = copy.deepcopy(PROFILES[int(profile)])
             self.profile_num = int(profile)
         else:
-            self.profile = PROFILES[1]
+            self.profile = copy.deepcopy(PROFILES[1])
             self.profile_num = 1
-        self.port = port
-        self.proxy = proxy
+
+        if self.geoip_enabled:
+            self.geo = resolve_geoip(self.proxy)
+            if self.geo:
+                self.profile.timezone = self.geo["timezone"]
+                self.profile.locale = self.geo["locale"]
+                self.profile.languages = self.geo["languages"]
+                if self.log_enabled:
+                    self._log(f"GeoIP matched: {self.geo.get('country')} ({self.geo.get('city')}) -> tz={self.profile.timezone} locale={self.profile.locale}")
         self.headless = headless
         self.block_trackers = block_trackers
         self.extra_env = extra_env or {}
-        self.log_enabled = log
         self.proc: subprocess.Popen | None = None
         self._pw = None
         self._browser = None
@@ -1086,7 +1187,7 @@ class Alveria:
         if self._browser is None:
             self._pw = sync_playwright().start()
             self._browser = self._pw.chromium.connect_over_cdp(f"http://127.0.0.1:{self.port}")
-            self._ctx = self._browser.new_context(
+            ctx_kwargs = dict(
                 viewport={"width": self.profile.screen[0], "height": min(self.profile.screen[1], 1080)},
                 device_scale_factor=self.profile.device_scale,
                 locale=self.profile.locale,
@@ -1097,6 +1198,15 @@ class Alveria:
                 java_script_enabled=True,
                 extra_http_headers=self.profile.client_hints(),
             )
+            if self.geo and self.geo.get("lat") is not None and self.geo.get("lon") is not None:
+                ctx_kwargs["geolocation"] = {
+                    "latitude": float(self.geo["lat"]),
+                    "longitude": float(self.geo["lon"]),
+                    "accuracy": 80
+                }
+                ctx_kwargs["permissions"] = ["geolocation"]
+
+            self._ctx = self._browser.new_context(**ctx_kwargs)
             # Pasang stealth JS injection
             self._ctx.add_init_script(stealth_js(self.profile, self.session_seed))
 
@@ -1445,18 +1555,21 @@ def main():
     f.add_argument("--wait", type=float, default=15)
     f.add_argument("--profile", default="1", help="Profile 1-7 atau random")
     f.add_argument("--proxy")
+    f.add_argument("--geoip", action="store_true", help="Auto-match timezone, locale, coordinates with proxy/IP")
 
     s = sub.add_parser("shot", help="screenshot")
     s.add_argument("url")
     s.add_argument("out")
     s.add_argument("--wait", type=float, default=15)
-    s.add_argument("--profile", default="1", help="Profile 1-7 atau random")
+    s.add_argument("--profile", default="1", help="Profile 1-10, random, atau firefox")
     s.add_argument("--proxy")
+    s.add_argument("--geoip", action="store_true", help="Auto-match timezone, locale, coordinates with proxy/IP")
 
     sv = sub.add_parser("serve", help="foreground CDP server")
     sv.add_argument("--port", type=int, default=DEFAULT_PORT)
-    sv.add_argument("--profile", default="1", help="Profile 1-7 atau random")
+    sv.add_argument("--profile", default="1", help="Profile 1-10, random, atau firefox")
     sv.add_argument("--proxy")
+    sv.add_argument("--geoip", action="store_true", help="Auto-match timezone, locale, coordinates with proxy/IP")
 
     sub.add_parser("profiles", help="list profil")
     sub.add_parser("install", help="unduh otomatis core binary untuk arsitektur ini")
@@ -1476,7 +1589,7 @@ def main():
 
     if a.cmd == "serve":
         prof = int(a.profile) if str(a.profile).isdigit() else a.profile
-        br = Alveria(profile=prof, port=a.port, proxy=a.proxy)
+        br = Alveria(profile=prof, port=a.port, proxy=a.proxy, geoip=a.geoip)
         br.start()
         print(f"CDP: http://127.0.0.1:{a.port}  profile={br.profile.name}", flush=True)
         try:
@@ -1489,7 +1602,7 @@ def main():
 
     if a.cmd == "fetch":
         prof = int(a.profile) if str(a.profile).isdigit() else a.profile
-        with Alveria(profile=prof, proxy=a.proxy) as br:
+        with Alveria(profile=prof, proxy=a.proxy, geoip=a.geoip) as br:
             pg = br.page()
             pg.goto(a.url, wait_until="domcontentloaded", timeout=90000)
             br.wait_settle(pg, a.wait)
@@ -1499,7 +1612,7 @@ def main():
 
     if a.cmd == "shot":
         prof = int(a.profile) if str(a.profile).isdigit() else a.profile
-        with Alveria(profile=prof, proxy=a.proxy) as br:
+        with Alveria(profile=prof, proxy=a.proxy, geoip=a.geoip) as br:
             pg = br.page()
             pg.goto(a.url, wait_until="domcontentloaded", timeout=90000)
             br.wait_settle(pg, a.wait)
