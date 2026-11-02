@@ -96,6 +96,7 @@ Designed to power synthetic user registration and account lifecycle farming (`fa
 * **`br.get_cookies_dict(page)` & `br.set_cookies(cookies)`**: Seamless cookie persistence and session handoff between worker processes.
 * **`br.fill_when_ready(page, selector, text)` & `br.click_when_ready(page, selector)`**: DOM stability polling + human interactions in one line.
 * **Resource Saver Mode (`block_images=True`, `block_fonts=True`)**: Drops heavy assets at the CDP layer to keep RAM below ~40 MB during massive parallel account runs.
+* **Heavy SPA Engine Mode (`spa_mode=True` & `br.goto_spa(page, url)`)**: Extended 180s script engine budget + socket-level tracker dropping (`OBSCURA_BLOCK_TRACKERS=1`) and non-blocking commit navigation, allowing low-power ARM CPUs (STB/Raspberry Pi) to hydrate complex React/Next.js/Remix applications without timing out.
 * **`br.solve_and_inject_turnstile(page)`**: Hybrid Turnstile bridge that solves via background solver/token pool and injects the token into Alveria's DOM.
 
 ---

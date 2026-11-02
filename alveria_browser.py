@@ -1155,12 +1155,13 @@ def generate_bezier_path(start: Tuple[float, float], end: Tuple[float, float],
 class Alveria:
     def __init__(self, profile: int | str = 1, port: int = DEFAULT_PORT,
                  proxy: str | None = None, geoip: bool = False,
-                 auto_turnstile: bool = True,
+                 auto_turnstile: bool = True, spa_mode: bool = False,
                  headless: bool = True, block_trackers: bool = True,
                  block_images: bool = False, block_fonts: bool = False,
                  extra_env: dict | None = None, log: bool = True):
-        self.block_images = block_images
-        self.block_fonts = block_fonts
+        self.spa_mode = spa_mode
+        self.block_images = True if spa_mode else block_images
+        self.block_fonts = True if spa_mode else block_fonts
         self.log_enabled = log
         self.geoip_enabled = geoip
         self.auto_turnstile = auto_turnstile
@@ -1208,14 +1209,18 @@ class Alveria:
             print(f"[alveria] {msg}", file=sys.stderr, flush=True)
 
     def _env(self) -> dict:
+        # Tuning adaptif: SPA mode memberi kelonggaran watchdog untuk bundle React/Next.js berat di ARM CPU
+        deadline = "180000" if getattr(self, "spa_mode", False) else "90000"
+        nav_timeout = "180000" if getattr(self, "spa_mode", False) else "90000"
+        cdp_timeout = "240000" if getattr(self, "spa_mode", False) else "120000"
+
         env = {
             "PATH": "/usr/bin:/bin",
             "HOME": os.environ.get("HOME", str(Path.home())),
-            # tuning wajib: tanpa ini React/Remix gagal hydrate
-            "OBSCURA_MODULE_BUDGET_MS": "60000",
-            "OBSCURA_SCRIPT_DEADLINE_MS": "60000",
-            "OBSCURA_NAV_TIMEOUT_MS": "90000",
-            "OBSCURA_CDP_COMMAND_TIMEOUT_MS": "120000",
+            "OBSCURA_MODULE_BUDGET_MS": deadline,
+            "OBSCURA_SCRIPT_DEADLINE_MS": deadline,
+            "OBSCURA_NAV_TIMEOUT_MS": nav_timeout,
+            "OBSCURA_CDP_COMMAND_TIMEOUT_MS": cdp_timeout,
             # fingerprint engine-level
             "OBSCURA_PROFILE": str(self.profile_num),
             "OBSCURA_TIMEZONE": self.profile.timezone,
@@ -1223,7 +1228,7 @@ class Alveria:
             "OBSCURA_STORAGE_DIR": str(HOME / "storage" / self.profile.name),
         }
         if self.block_trackers:
-            env["OBSCURA_BLOCK_TRACKERSM"] = "1"
+            env["OBSCURA_BLOCK_TRACKERS"] = "1"
         env.update(self.extra_env)
         return env
 
@@ -1350,6 +1355,24 @@ class Alveria:
         page.wait_for_timeout(int(seconds * 1000))
         if self.auto_turnstile:
             self._check_and_auto_solve_turnstile(page)
+
+    def goto_spa(self, page, url: str, wait_selector: Optional[str] = None, timeout: float = 60) -> bool:
+        """
+        Navigasi cerdas khusus SPA berat (React, Next.js, Remix, Vue) di CPU STB.
+        Menggunakan wait_until='commit' agar tidak nyangkut menunggu long-polling/WebSocket,
+        lalu mem-polling DOM / selector target secara non-blocking.
+        """
+        self._log(f"goto_spa navigating: {url} (timeout={timeout}s)")
+        page.goto(url, wait_until="commit", timeout=int(timeout * 1000))
+        if wait_selector:
+            res = self.poll_js(page, f"() => document.querySelector({json.dumps(wait_selector)})", timeout=timeout)
+            if self.auto_turnstile:
+                self._check_and_auto_solve_turnstile(page)
+            return bool(res)
+        res = self.smart_wait(page, timeout=timeout)
+        if self.auto_turnstile:
+            self._check_and_auto_solve_turnstile(page)
+        return res
 
     def _check_and_auto_solve_turnstile(self, page):
         """Otomatis deteksi dan selesaikan Turnstile jika ada widget di DOM."""
@@ -1656,6 +1679,7 @@ def main():
     f.add_argument("--profile", default="1", help="Profile 1-7 atau random")
     f.add_argument("--proxy")
     f.add_argument("--geoip", action="store_true", help="Auto-match timezone, locale, coordinates with proxy/IP")
+    f.add_argument("--spa", action="store_true", help="Aktifkan SPA mode (deadline 180s + block images/fonts untuk CPU STB)")
 
     s = sub.add_parser("shot", help="screenshot")
     s.add_argument("url")
@@ -1664,12 +1688,14 @@ def main():
     s.add_argument("--profile", default="1", help="Profile 1-10, random, atau firefox")
     s.add_argument("--proxy")
     s.add_argument("--geoip", action="store_true", help="Auto-match timezone, locale, coordinates with proxy/IP")
+    s.add_argument("--spa", action="store_true", help="Aktifkan SPA mode (deadline 180s + block images/fonts untuk CPU STB)")
 
     sv = sub.add_parser("serve", help="foreground CDP server")
     sv.add_argument("--port", type=int, default=DEFAULT_PORT)
     sv.add_argument("--profile", default="1", help="Profile 1-10, random, atau firefox")
     sv.add_argument("--proxy")
     sv.add_argument("--geoip", action="store_true", help="Auto-match timezone, locale, coordinates with proxy/IP")
+    sv.add_argument("--spa", action="store_true", help="Aktifkan SPA mode (deadline 180s + block images/fonts untuk CPU STB)")
 
     sub.add_parser("profiles", help="list profil")
     sub.add_parser("install", help="unduh otomatis core binary untuk arsitektur ini")
@@ -1689,7 +1715,7 @@ def main():
 
     if a.cmd == "serve":
         prof = int(a.profile) if str(a.profile).isdigit() else a.profile
-        br = Alveria(profile=prof, port=a.port, proxy=a.proxy, geoip=a.geoip)
+        br = Alveria(profile=prof, port=a.port, proxy=a.proxy, geoip=a.geoip, spa_mode=a.spa)
         br.start()
         print(f"CDP: http://127.0.0.1:{a.port}  profile={br.profile.name}", flush=True)
         try:
@@ -1702,9 +1728,12 @@ def main():
 
     if a.cmd == "fetch":
         prof = int(a.profile) if str(a.profile).isdigit() else a.profile
-        with Alveria(profile=prof, proxy=a.proxy, geoip=a.geoip) as br:
+        with Alveria(profile=prof, proxy=a.proxy, geoip=a.geoip, spa_mode=a.spa) as br:
             pg = br.page()
-            pg.goto(a.url, wait_until="domcontentloaded", timeout=90000)
+            if a.spa:
+                br.goto_spa(pg, a.url, timeout=a.wait)
+            else:
+                pg.goto(a.url, wait_until="domcontentloaded", timeout=90000)
             br.wait_settle(pg, a.wait)
             print(pg.evaluate(a.eval))
             br._log(f"rss={br.rss_mb()}MB profile={br.profile.name}")
@@ -1712,9 +1741,12 @@ def main():
 
     if a.cmd == "shot":
         prof = int(a.profile) if str(a.profile).isdigit() else a.profile
-        with Alveria(profile=prof, proxy=a.proxy, geoip=a.geoip) as br:
+        with Alveria(profile=prof, proxy=a.proxy, geoip=a.geoip, spa_mode=a.spa) as br:
             pg = br.page()
-            pg.goto(a.url, wait_until="domcontentloaded", timeout=90000)
+            if a.spa:
+                br.goto_spa(pg, a.url, timeout=a.wait)
+            else:
+                pg.goto(a.url, wait_until="domcontentloaded", timeout=90000)
             br.wait_settle(pg, a.wait)
             pg.screenshot(path=a.out)
             print(f"saved {a.out} rss={br.rss_mb()}MB")
