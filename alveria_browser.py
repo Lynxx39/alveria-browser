@@ -27,7 +27,7 @@ Fitur Human Simulation & Tooling:
   - Human keyboard typing dengan Gaussian delays & natural typo simulation
   - Smooth easing human scroll
   - Smart wait / hydration polling tanpa membunuh context V8
-  - Native Turnstile token harvester
+  - External token bridge (inject_turnstile_token)
   - Tracker / ad network request blocking (save memory & bandwidth)
 
 Workaround bug obscura 0.2.6 yang ditangani:
@@ -35,11 +35,11 @@ Workaround bug obscura 0.2.6 yang ditangani:
   2. evaluate() async panjang → context destroyed → semua helper pakai polling pendek
   3. contexts[0].pages kosong → selalu buat page sendiri
   4. React/Remix hydration timeout 3s → OBSCURA_MODULE_BUDGET_MS=60000
+  5. Cross-origin iframe simulated → widget challenge (Turnstile) di-bridge via inject_turnstile_token
 
 Usage:
   alveria-browser fetch <url> [--eval EXPR] [--wait SEC] [--profile N]
   alveria-browser shot <url> <out.png> [--profile N]
-  alveria-browser turnstile <url> [--profile N] [--wait SEC]
   alveria-browser serve [--port 9222] [--profile N]   # foreground CDP
   alveria-browser profiles                             # list profil
 
@@ -50,7 +50,7 @@ Python API:
       page.goto("https://target.com/")
       br.human_type(page, "input[name=email]", "user@example.com")
       br.human_click(page, "button[type=submit]")
-      token = br.extract_turnstile_token(page)
+      # br.inject_turnstile_token(page, external_token)
 """
 from __future__ import annotations
 
@@ -778,8 +778,11 @@ def generate_bezier_path(start: Tuple[float, float], end: Tuple[float, float],
 class Alveria:
     def __init__(self, profile: int | str = 1, port: int = DEFAULT_PORT,
                  proxy: str | None = None, headless: bool = True,
-                 block_trackers: bool = True, extra_env: dict | None = None,
+                 block_trackers: bool = True, block_images: bool = False,
+                 block_fonts: bool = False, extra_env: dict | None = None,
                  log: bool = True):
+        self.block_images = block_images
+        self.block_fonts = block_fonts
         if profile == "random":
             self.profile = create_random_profile()
             self.profile_num = 1 if "win" in self.profile.name else (4 if "mac" in self.profile.name else 7)
@@ -879,15 +882,19 @@ class Alveria:
             # Pasang stealth JS injection
             self._ctx.add_init_script(stealth_js(self.profile, self.session_seed))
 
-            # Tracker / Ad blocking di level routing Playwright
-            if self.block_trackers:
-                def route_filter(route):
-                    url = route.request.url.lower()
-                    if any(domain in url for domain in TRACKER_DOMAINS):
-                        route.abort()
-                    else:
-                        route.continue_()
-                self._ctx.route("**/*", route_filter)
+            # Resource & Tracker route filtering (hemat bandwidth & RAM)
+            def route_filter(route):
+                req = route.request
+                url = req.url.lower()
+                r_type = req.resource_type
+                if self.block_trackers and any(domain in url for domain in TRACKER_DOMAINS):
+                    return route.abort()
+                if self.block_images and r_type in ("image", "media", "imageset"):
+                    return route.abort()
+                if self.block_fonts and r_type == "font":
+                    return route.abort()
+                return route.continue_()
+            self._ctx.route("**/*", route_filter)
 
         return self._ctx.new_page()
 
@@ -1021,28 +1028,164 @@ class Alveria:
             page.mouse.wheel(0, step_val * factor)
             time.sleep(random.uniform(0.02, 0.05))
 
-    # ---- Turnstile Token Harvester ----
-    def extract_turnstile_token(self, page, timeout: float = 45) -> Optional[str]:
-        """Mengekstrak respons token Turnstile secara otomatis."""
-        expr = """() => {
-          // 1. Cek dari window.turnstile API
-          try {
-            if (typeof window.turnstile !== 'undefined' && window.turnstile.getResponse) {
-              const resp = window.turnstile.getResponse();
-              if (resp && resp.length > 20) return resp;
-            }
-          } catch (e) {}
-
-          // 2. Cek hidden input field standar Turnstile
-          const input = document.querySelector('input[name="cf-turnstile-response"]') ||
-                        document.querySelector('input[name*="turnstile"]') ||
-                        document.querySelector('input[id*="cf-chl-widget"]');
-          if (input && input.value && input.value.length > 20) {
-            return input.value;
+    # ---- External Token Bridge & Hybrid Turnstile Solver ----
+    def inject_turnstile_token(self, page, token: str) -> bool:
+        """Inject respons token Turnstile (dari solver luar/API) ke dalam input form cf-turnstile-response."""
+        js = """(t) => {
+          let input = document.querySelector('input[name="cf-turnstile-response"]');
+          if (!input) {
+            input = document.createElement('input');
+            input.type = 'hidden';
+            input.name = 'cf-turnstile-response';
+            (document.querySelector('form') || document.body).appendChild(input);
           }
-          return null;
+          input.value = t;
+          return true;
         }"""
-        return self.poll_js(page, expr, timeout=timeout, interval=1.0)
+        try:
+            return bool(page.evaluate(js, token))
+        except Exception:
+            return False
+
+    def solve_and_inject_turnstile(self, page, sitekey: Optional[str] = None, timeout: int = 45) -> Optional[str]:
+        """
+        Hybrid Turnstile Solver:
+        Karena Obscura mensimulasikan iframe di JS tanpa browsing context cross-origin asli,
+        metode ini mengambil token via solver terpusat workspace (farming.turnstile / TokenPool)
+        lalu langsung menginjeksinya ke DOM form Alveria.
+        """
+        if not sitekey:
+            sitekey = page.evaluate("""() => {
+              const el = document.querySelector('[data-sitekey]');
+              if (el) return el.getAttribute('data-sitekey');
+              for (const s of document.querySelectorAll('script')) {
+                const src = s.src || '';
+                const m = src.match(/sitekey=([a-zA-Z0-9_-]+)/);
+                if (m) return m[1];
+              }
+              return null;
+            }""")
+
+        if not sitekey:
+            self._log("Tidak dapat mendeteksi sitekey Turnstile di DOM.")
+            return None
+
+        self._log(f"Turnstile terdeteksi (sitekey: {sitekey}). Meminta token via solver...")
+        token = None
+        try:
+            import sys
+            root = Path(__file__).resolve().parent.parent
+            if str(root) not in sys.path:
+                sys.path.insert(0, str(root))
+            from farming.turnstile import solve
+            token = solve(sitekey=sitekey, proxy=self.proxy, timeout=timeout, referer=page.url)
+        except Exception as e:
+            self._log(f"Hybrid solver error: {e}")
+
+        if token:
+            self.inject_turnstile_token(page, token)
+            self._log("[+] Turnstile token berhasil di-inject ke DOM.")
+            return token
+        return None
+
+    # ---- Cookie & Session Helpers (Kebutuhan Modul Farming) ----
+    def get_cookies(self, page=None) -> list[dict]:
+        """Ambil list cookie lengkap dari context browser saat ini."""
+        if not self._ctx:
+            return []
+        return self._ctx.cookies()
+
+    def get_cookies_dict(self, page=None) -> dict[str, str]:
+        """Ambil cookie dalam format dictionary {name: value} untuk requests / curl_cffi."""
+        cookies = self.get_cookies(page)
+        return {c["name"]: c["value"] for c in cookies}
+
+    def set_cookies(self, cookies: Union[list[dict], dict[str, str]], domain: Optional[str] = None):
+        """Inject cookies ke dalam context browser Alveria."""
+        if not self._ctx:
+            return
+        if isinstance(cookies, dict):
+            cookie_list = []
+            for k, v in cookies.items():
+                item = {"name": k, "value": v, "path": "/"}
+                if domain:
+                    item["domain"] = domain
+                cookie_list.append(item)
+            self._ctx.add_cookies(cookie_list)
+        elif isinstance(cookies, list):
+            self._ctx.add_cookies(cookies)
+
+    def export_to_requests(self, page=None):
+        """Buat pre-configured requests.Session dengan User-Agent, Client Hints & cookies yang sama."""
+        import requests
+        s = requests.Session()
+        s.headers.update({
+            "User-Agent": self.profile.ua,
+            "Accept-Language": f"{self.profile.locale},en;q=0.9",
+        })
+        s.headers.update(self.profile.client_hints())
+        s.cookies.update(self.get_cookies_dict(page))
+        return s
+
+    # ---- Slider Captcha & Element Helpers (Aliyun / Geetest) ----
+    def drag_slider(self, page, handle_selector: str, distance_x: int, steps: int = 30) -> bool:
+        """
+        Drag slider puzzle secara manusiawi (Aliyun / Geetest).
+        Memiliki akselerasi S-curve, micro-jitter sumbu Y (1-3px), dan overshoot/retraction.
+        """
+        box = self.poll_js(
+            page,
+            f"() => {{ const el = document.querySelector({json.dumps(handle_selector)});"
+            " if (!el) return null;"
+            " const r = el.getBoundingClientRect();"
+            " return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; }"
+        )
+        if not box:
+            return False
+
+        start_x, start_y = box["x"], box["y"]
+        self.human_move(page, start_x, start_y)
+        page.mouse.down()
+        time.sleep(random.uniform(0.08, 0.15))
+
+        overshoot = random.randint(2, 5) if random.random() < 0.35 else 0
+        target_dist = distance_x + overshoot
+
+        for i in range(steps):
+            progress = (i + 1) / steps
+            # S-curve smoothstep
+            eased = progress * progress * (3 - 2 * progress)
+            next_x = start_x + (target_dist * eased)
+            drift_y = start_y + math.sin(progress * math.pi) * random.uniform(-2, 2)
+            page.mouse.move(next_x, drift_y)
+            time.sleep(random.uniform(0.01, 0.03))
+
+        if overshoot > 0:
+            time.sleep(random.uniform(0.05, 0.1))
+            page.mouse.move(start_x + distance_x, start_y + random.uniform(-1, 1))
+            time.sleep(random.uniform(0.03, 0.06))
+
+        time.sleep(random.uniform(0.1, 0.2))
+        page.mouse.up()
+        return True
+
+    def click_when_ready(self, page, selector: str, timeout: float = 30) -> bool:
+        """Tunggu selector siap & visible, lalu klik secara manusiawi."""
+        if not self.poll_selector(page, selector, timeout=timeout):
+            return False
+        return self.human_click(page, selector)
+
+    def fill_when_ready(self, page, selector: str, text: str, timeout: float = 30) -> bool:
+        """Tunggu selector siap & visible, fokuskan, bersihkan, lalu ketik secara manusiawi."""
+        if not self.poll_selector(page, selector, timeout=timeout):
+            return False
+        return self.human_type(page, selector, text)
+
+    def get_text(self, page, selector: str, timeout: float = 15) -> Optional[str]:
+        """Ambil innerText dari elemen setelah siap."""
+        if not self.poll_selector(page, selector, timeout=timeout):
+            return None
+        return page.evaluate(f"() => {{ const el = document.querySelector({json.dumps(selector)}); return el ? el.innerText : null; }}")
 
     # ---- teardown ----
     def stop(self):
@@ -1091,12 +1234,6 @@ def main():
     s.add_argument("--wait", type=float, default=15)
     s.add_argument("--profile", default="1", help="Profile 1-7 atau random")
     s.add_argument("--proxy")
-
-    t = sub.add_parser("turnstile", help="tunggu dan extract token Turnstile")
-    t.add_argument("url")
-    t.add_argument("--profile", default="1", help="Profile 1-7 atau random")
-    t.add_argument("--wait", type=float, default=45)
-    t.add_argument("--proxy")
 
     sv = sub.add_parser("serve", help="foreground CDP server")
     sv.add_argument("--port", type=int, default=DEFAULT_PORT)
@@ -1150,19 +1287,6 @@ def main():
             br.wait_settle(pg, a.wait)
             pg.screenshot(path=a.out)
             print(f"saved {a.out} rss={br.rss_mb()}MB")
-        return 0
-
-    if a.cmd == "turnstile":
-        prof = int(a.profile) if str(a.profile).isdigit() else a.profile
-        with Alveria(profile=prof, proxy=a.proxy) as br:
-            pg = br.page()
-            pg.goto(a.url, wait_until="domcontentloaded", timeout=90000)
-            token = br.extract_turnstile_token(pg, timeout=a.wait)
-            if token:
-                print(f"[SUCCESS] Turnstile token:\n{token}")
-            else:
-                print("[FAILED] Turnstile token tidak ditemukan dalam batas waktu", file=sys.stderr)
-                return 1
         return 0
 
     return 1

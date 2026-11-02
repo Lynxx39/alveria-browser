@@ -32,7 +32,7 @@ Traditional headless browsers (Chromium, Puppeteer, Camoufox) are **monolithic b
 | **Font Protection** | Leaked | Protected | Leaked ❌ | **Platform Whitelist** ✅ |
 | **Human Simulation** | None | Manual | None ❌ | **Bézier + Gaussian** ✅ |
 | **Procedural Random Profiles** | None | Supported | None ❌ | **Dynamic Matched Pools** ✅ |
-| **Turnstile Harvester** | None | None | None ❌ | **Built-in** ✅ |
+| **Cross-Origin Challenges (Turnstile/reCAPTCHA)** | Supported | Supported | Not Supported ❌ | **External Token Bridge (`inject_turnstile_token`)** ⚠️ |
 
 ---
 
@@ -77,6 +77,19 @@ Bypass modern behavioral bot detection (Cloudflare, Akamai, Datadome):
 * **`br.human_click(page, selector)`**: Moves mouse naturally, calculates bounding box with randomized interior coordinates, and pauses with human mousedown/mouseup latency (70–150ms).
 * **`br.human_type(page, selector, text)`**: Types with natural Gaussian delay distribution (45–80 WPM), punctuation hesitation pauses, and **simulates human typos (2% rate) with automated Backspace correction**.
 * **`br.human_scroll(page, delta_y)`**: Smooth scrolling utilizing a sinusoidal easing curve.
+* **`br.drag_slider(page, handle_selector, distance_x)`**: Realistic S-curve slider drag with variable velocity and Y-axis micro-drift for Aliyun and Geetest puzzle captchas.
+
+---
+
+## 🌾 Built for Farming & Micro-VPS Automation
+
+Designed to power synthetic user registration and account lifecycle farming (`farming/` suite):
+
+* **`br.export_to_requests(page)`**: Extracts authenticated cookies and headers into a pre-configured `requests.Session` so workers can transition from browser automation to fast HTTP APIs immediately.
+* **`br.get_cookies_dict(page)` & `br.set_cookies(cookies)`**: Seamless cookie persistence and session handoff between worker processes.
+* **`br.fill_when_ready(page, selector, text)` & `br.click_when_ready(page, selector)`**: DOM stability polling + human interactions in one line.
+* **Resource Saver Mode (`block_images=True`, `block_fonts=True`)**: Drops heavy assets at the CDP layer to keep RAM below ~40 MB during massive parallel account runs.
+* **`br.solve_and_inject_turnstile(page)`**: Hybrid Turnstile bridge that solves via background solver/token pool and injects the token into Alveria's DOM.
 
 ---
 
@@ -102,10 +115,8 @@ with Alveria(profile=1, block_trackers=True) as br:
     # Smooth curve mouse move & click
     br.human_click(page, "button[type=submit]")
 
-    # Auto-extract Cloudflare Turnstile token if present
-    token = br.extract_turnstile_token(page, timeout=30)
-    if token:
-        print("[+] Turnstile Solved:", token)
+    # Inject external Turnstile token if form requires cf-turnstile-response
+    # br.inject_turnstile_token(page, token="0.xxxx...")
 
     print(f"[+] Done! Active RAM: {br.rss_mb()} MB")
 ```
@@ -121,9 +132,6 @@ python3 alveria_browser.py fetch https://bot.sannysoft.com --wait 10
 
 # Capture screenshot
 python3 alveria_browser.py shot https://example.com page.png
-
-# Solve and harvest Cloudflare Turnstile token
-python3 alveria_browser.py turnstile https://target-site.com/challenge
 
 # Run as foreground CDP server (ready for Playwright/Puppeteer connect_over_cdp)
 python3 alveria_browser.py serve --port 9222 --profile 1
@@ -166,6 +174,18 @@ creepjs:
   Lies                          0 (passed)
   Fonts matching                Consistent Windows/Mac profile
 ```
+
+---
+
+## ⚠️ Architecture Note: Cross-Origin Iframes & Turnstile
+
+Obscura's Rust engine implements lightweight in-JS DOM frame simulation (`_IframeDocument`, `_IframeWindow`) rather than independent OS/process browsing contexts. Because interactive widgets like **Cloudflare Turnstile** and **reCAPTCHA** require native cross-origin `postMessage` protocol between independent contexts, they cannot render or solve natively inside the engine.
+
+* **For 95% of automation**: Login flows, web scraping, synthetic user farming, and standard anti-bot evasion (FingerprintJS, CreepJS, Bot Sannysoft) work out-of-the-box at ultra-low memory (~30 MB RSS).
+* **For Turnstile-gated forms**: Acquire the token via an external solver API or solver micro-service, then inject it instantly into Alveria's page:
+  ```python
+  br.inject_turnstile_token(page, token="0.xxxx...")
+  ```
 
 ---
 
