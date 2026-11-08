@@ -71,6 +71,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
+try:
+    import cv2
+    import numpy as np
+    HAS_CV2 = True
+except ImportError:
+    HAS_CV2 = False
+
 # Deteksi root path: folder instalasi alveria-browser
 HOME = Path(__file__).resolve().parent
 CORE = HOME / "bin" / "obscura-core"
@@ -1637,6 +1644,329 @@ class Alveria:
         if not self.poll_selector(page, selector, timeout=timeout):
             return None
         return page.evaluate(f"() => {{ const el = document.querySelector({json.dumps(selector)}); return el ? el.innerText : null; }}")
+
+    # ---- Aliyun Slider & Puzzle Automated Solver ----
+    def calculate_aliyun_puzzle_gap(
+        self,
+        page,
+        img_selector: str = "#aliyunCaptcha-img",
+        puzzle_selector: str = "#aliyunCaptcha-puzzle"
+    ) -> Optional[dict]:
+        """
+        Menghitung pergeseran slider Aliyun Captcha (gap offset).
+        Dual-mode Engine:
+        1. In-Page V8 Canvas Engine (Zero-RAM, Zero-Dependency, super cepat untuk STB ARM64).
+        2. Fallback / Accelerated CV2 Engine jika OpenCV tersedia di runtime Python.
+        Returns: { 'slider_travel': float, 'target_x': float, 'confidence': float, 'method': str }
+        """
+        # Coba In-Page V8 Canvas Engine terlebih dahulu (Zero-Dependency & Zero Overhead)
+        try:
+            res = page.evaluate("""async ({ imgSel, pzSel }) => {
+                const bgImg = document.querySelector(imgSel);
+                const pzImg = document.querySelector(pzSel);
+                const slider = document.querySelector('#aliyunCaptcha-sliding-slider, .aliyunCaptcha-sliding-slider');
+                if (!bgImg || !pzImg) return null;
+
+                const bgSrc = bgImg.src;
+                const pzSrc = pzImg.src;
+                if (!bgSrc || !pzSrc) return null;
+
+                async function loadImgData(src) {
+                    let bmp;
+                    try {
+                        const res = await fetch(src, { cache: 'force-cache' });
+                        const blob = await res.blob();
+                        bmp = await createImageBitmap(blob);
+                    } catch (e) {
+                        return null;
+                    }
+                    const cvs = document.createElement('canvas');
+                    cvs.width = bmp.width;
+                    cvs.height = bmp.height;
+                    const ctx = cvs.getContext('2d');
+                    ctx.drawImage(bmp, 0, 0);
+                    return {
+                        w: bmp.width,
+                        h: bmp.height,
+                        data: ctx.getImageData(0, 0, bmp.width, bmp.height).data
+                    };
+                }
+
+                const [bg, pz] = await Promise.all([loadImgData(bgSrc), loadImgData(pzSrc)]);
+                if (!bg || !pz) return null;
+
+                const domWidth = bgImg.getBoundingClientRect().width || 300.0;
+                const scale = domWidth / bg.w;
+
+                // 1. Ekstrak kontur siluet jigsaw piece dari alpha channel (> 80)
+                let minX = pz.w, maxX = 0, minY = pz.h, maxY = 0;
+                let solidCount = 0;
+                for (let y = 0; y < pz.h; y++) {
+                    for (let x = 0; x < pz.w; x++) {
+                        const a = pz.data[(y * pz.w + x) * 4 + 3];
+                        if (a > 80) {
+                            if (x < minX) minX = x;
+                            if (x > maxX) maxX = x;
+                            if (y < minY) minY = y;
+                            if (y > maxY) maxY = y;
+                            solidCount++;
+                        }
+                    }
+                }
+                if (solidCount < 30 || minX >= maxX || minY >= maxY) return null;
+
+                const pieceW = maxX - minX + 1;
+                const pieceH = maxY - minY + 1;
+
+                // 2. Sampling pixel representatif dari potongan puzzle
+                const step = Math.max(1, Math.floor(Math.sqrt((pieceW * pieceH) / 300)));
+                const pts = [];
+                for (let py = minY; py <= maxY; py += step) {
+                    for (let px = minX; px <= maxX; px += step) {
+                        const idx = (py * pz.w + px) * 4;
+                        if (pz.data[idx + 3] > 100) {
+                            const gray = (pz.data[idx] * 299 + pz.data[idx + 1] * 587 + pz.data[idx + 2] * 114) / 1000;
+                            pts.push({ dx: px - minX, dy: py - minY, val: gray });
+                        }
+                    }
+                }
+                if (pts.length < 10) return null;
+
+                // 3. Normalized Cross Correlation across horizontal band
+                const searchStartY = Math.max(0, minY - 4);
+                const searchEndY = Math.min(bg.h - pieceH, minY + 4);
+                const minSearchX = Math.floor(minX + pieceW * 0.65);
+                const maxSearchX = bg.w - pieceW - 8;
+
+                let bestScore = -Infinity;
+                let bestX = minSearchX;
+
+                const n = pts.length;
+                let sumP = 0, sumP2 = 0;
+                for (let i = 0; i < n; i++) {
+                    sumP += pts[i].val;
+                    sumP2 += pts[i].val * pts[i].val;
+                }
+                const denomP = Math.sqrt(Math.max(1e-5, n * sumP2 - sumP * sumP));
+
+                for (let x = minSearchX; x <= maxSearchX; x += 2) {
+                    for (let y = searchStartY; y <= searchEndY; y += 2) {
+                        let sumB = 0, sumB2 = 0, sumPB = 0;
+                        for (let i = 0; i < n; i++) {
+                            const bIdx = ((y + pts[i].dy) * bg.w + (x + pts[i].dx)) * 4;
+                            const bVal = (bg.data[bIdx] * 299 + bg.data[bIdx + 1] * 587 + bg.data[bIdx + 2] * 114) / 1000;
+                            sumB += bVal;
+                            sumB2 += bVal * bVal;
+                            sumPB += pts[i].val * bVal;
+                        }
+                        const denomB = Math.sqrt(Math.max(1e-5, n * sumB2 - sumB * sumB));
+                        const ncc = (n * sumPB - sumP * sumB) / (denomP * denomB);
+                        const yPenalty = Math.abs(y - minY) * 0.035;
+                        const score = ncc - yPenalty;
+
+                        if (score > bestScore) {
+                            bestScore = score;
+                            bestX = x;
+                        }
+                    }
+                }
+
+                const targetGapDom = bestX * scale;
+                const pieceOffsetDom = minX * scale;
+                const requiredPuzzleMove = Math.max(0.0, targetGapDom - pieceOffsetDom);
+
+                const trackW = slider && slider.parentElement ? (slider.parentElement.getBoundingClientRect().width || 300) : 300;
+                const sliderTravel = Math.max(0.0, Math.min(trackW - 36, requiredPuzzleMove * (trackW / domWidth)));
+
+                return {
+                    target_x: bestX,
+                    slider_travel: sliderTravel,
+                    confidence: bestScore,
+                    scale: scale,
+                    method: "In-Page V8 Canvas Engine (Zero-RAM)"
+                };
+            }""", {"imgSel": img_selector, "pzSel": puzzle_selector})
+            if res and res.get("slider_travel", 0) > 0:
+                return res
+        except Exception as e:
+            self._log(f"In-Page V8 solver warning: {e}")
+
+        # Fallback ke CV2 Engine jika OpenCV tersedia
+        if HAS_CV2:
+            try:
+                return self._solve_aliyun_cv2(page, img_selector, puzzle_selector)
+            except Exception as ce:
+                self._log(f"CV2 solver error: {ce}")
+
+        return None
+
+    def _solve_aliyun_cv2(self, page, img_selector: str, puzzle_selector: str) -> Optional[dict]:
+        """Solver fallback menggunakan OpenCV (Masked BGR + Canny Edge) jika libopencv tersedia."""
+        import base64
+        import urllib.request
+
+        img_src = page.evaluate(f"() => document.querySelector({json.dumps(img_selector)})?.src")
+        pz_src = page.evaluate(f"() => document.querySelector({json.dumps(puzzle_selector)})?.src")
+        if not img_src or not pz_src:
+            return None
+
+        def fetch_bytes(src: str) -> bytes:
+            if "base64," in src:
+                b64 = src.split("base64,", 1)[1]
+                return base64.b64decode(b64)
+            req = urllib.request.Request(src, headers={"User-Agent": self.profile.ua})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.read()
+
+        bg_bytes = fetch_bytes(img_src)
+        pz_bytes = fetch_bytes(pz_src)
+        if not bg_bytes or not pz_bytes:
+            return None
+
+        bg = cv2.imdecode(np.frombuffer(bg_bytes, np.uint8), cv2.IMREAD_COLOR)
+        pz = cv2.imdecode(np.frombuffer(pz_bytes, np.uint8), cv2.IMREAD_UNCHANGED)
+        if bg is None or pz is None:
+            return None
+
+        alpha = pz[:, :, 3] if pz.ndim == 3 and pz.shape[2] == 4 else None
+        if alpha is None:
+            gray = cv2.cvtColor(pz, cv2.COLOR_BGR2GRAY) if pz.ndim == 3 else pz
+            alpha = (gray > 10).astype(np.uint8) * 255
+
+        pts = np.argwhere(alpha > 80)
+        if pts.size == 0:
+            return None
+
+        min_y, min_x = int(pts[:, 0].min()), int(pts[:, 1].min())
+        max_y, max_x = int(pts[:, 0].max()), int(pts[:, 1].max())
+        piece = pz[min_y:max_y+1, min_x:max_x+1, :3]
+        mask = (alpha[min_y:max_y+1, min_x:max_x+1] > 80).astype(np.uint8) * 255
+
+        pad = 8
+        y_s = max(0, min_y - pad)
+        y_e = min(bg.shape[0], max_y + 1 + pad)
+        bg_band = bg[y_s:y_e, :]
+
+        res = cv2.matchTemplate(bg_band, piece, cv2.TM_CCOEFF_NORMED, mask=mask)
+        res[:, :max(70, min_x + 15)] = -1.0
+        res[:, int(bg.shape[1] - piece.shape[1] + 1):] = -1.0
+        np.nan_to_num(res, copy=False, nan=-1.0)
+        _, max_val, _, max_loc = cv2.minMaxLoc(res)
+
+        final_x = float(max_loc[0])
+        scale_x = 300.0 / bg.shape[1]
+        puzzle_disp = (final_x - min_x) * scale_x
+        # DOM scale translasi
+        slider_dist = puzzle_disp * (260.0 / 256.0)
+
+        return {
+            "target_x": final_x,
+            "slider_travel": float(slider_dist),
+            "confidence": float(max_val),
+            "method": f"Python OpenCV CV2 (conf={max_val:.3f})"
+        }
+
+    def solve_and_verify_aliyun(
+        self,
+        page,
+        max_attempts: int = 5,
+        timeout: float = 35.0
+    ) -> bool:
+        """
+        Menyelesaikan tantangan puzzle slider Aliyun secara otomatis & tuntas:
+        1. Menunggu modal puzzle siap (#aliyunCaptcha-img, #aliyunCaptcha-puzzle, dan slider).
+        2. Menghitung gap offset menggunakan In-Page V8 Canvas Engine atau CV2.
+        3. Menjalankan drag slider secara manusiawi (S-curve + micro-jitter Y).
+        4. Memverifikasi status sukses verifikasi dari server Aliyun.
+        """
+        self._log("[*] Memulai pemecahan Aliyun Captcha otomatis...")
+        for attempt in range(1, max_attempts + 1):
+            # 1. Pastikan gambar puzzle termuat
+            img_ready = False
+            for _ in range(30):
+                check = page.evaluate("""() => {
+                    const bg = document.querySelector('#aliyunCaptcha-img');
+                    const pz = document.querySelector('#aliyunCaptcha-puzzle');
+                    return Boolean(bg && pz && bg.src && pz.src && bg.complete && pz.complete);
+                }""")
+                if check:
+                    img_ready = True
+                    break
+                time.sleep(0.3)
+
+            if not img_ready:
+                self._log(f"[-] [Attempt {attempt}] Gambar puzzle Aliyun belum siap, memicu start...")
+                page.evaluate("""() => {
+                    const btn = document.querySelector('#aliyunCaptcha-start-icon, .aliyunCaptcha-start-icon, .aliyunCaptcha-btn');
+                    if (btn) btn.click();
+                }""")
+                time.sleep(1.0)
+                continue
+
+            # 2. Hitung jarak slider
+            calc = self.calculate_aliyun_puzzle_gap(page)
+            if not calc or calc.get("slider_travel", 0) <= 0:
+                self._log(f"[-] [Attempt {attempt}] Gagal menghitung gap puzzle, me-refresh...")
+                self._refresh_aliyun_puzzle(page)
+                time.sleep(1.5)
+                continue
+
+            slider_dist = calc["slider_travel"]
+            conf = calc.get("confidence", 0.0)
+            method = calc.get("method", "Unknown")
+            self._log(f"[*] [Attempt {attempt}] Gap terdeteksi: slider={slider_dist:.1f}px (conf={conf:.3f}, engine={method})")
+
+            # 3. Geser slider dengan kurva manusia
+            drag_ok = self.drag_slider(page, "#aliyunCaptcha-sliding-slider, .aliyunCaptcha-sliding-slider", int(slider_dist))
+            if not drag_ok:
+                self._log(f"[-] [Attempt {attempt}] Gagal menggeser slider DOM.")
+                continue
+
+            # 4. Tunggu respon verifikasi
+            t_end = time.time() + 10.0
+            passed = False
+            while time.time() < t_end:
+                status = page.evaluate("""() => {
+                    const btn = document.querySelector('.aliyunCaptcha-btn, #aliyunCaptcha-btn, .aliyunCaptcha-start-icon');
+                    const hasSuccess = btn ? (
+                        btn.classList.contains('aliyunCaptcha-btn-success') ||
+                        (btn.innerText || '').includes('Verified') ||
+                        (btn.innerText || '').includes('Verification passed') ||
+                        (btn.innerText || '').includes('通过') ||
+                        Boolean(btn.querySelector('.aliyunCaptcha-icon-success, svg[class*="success"]'))
+                    ) : false;
+                    const token = window.__aliyun_captcha_token || window.__claim_captcha_res;
+                    return { hasSuccess, hasToken: Boolean(token) };
+                }""")
+                if status.get("hasSuccess") or status.get("hasToken"):
+                    passed = True
+                    break
+                time.sleep(0.3)
+
+            if passed:
+                self._log(f"[✓] Aliyun Captcha berhasil diverifikasi pada attempt {attempt}!")
+                time.sleep(1.0)
+                return True
+
+            self._log(f"[-] [Attempt {attempt}] Verifikasi belum lolos, me-refresh puzzle...")
+            self._refresh_aliyun_puzzle(page)
+            time.sleep(1.5)
+
+        self._log("[-] Aliyun Captcha gagal diselesaikan setelah seluruh percobaan.")
+        return False
+
+    def _refresh_aliyun_puzzle(self, page):
+        """Klik tombol refresh pada modal Aliyun Captcha."""
+        try:
+            page.evaluate("""() => {
+                const modal = document.querySelector('#aliyunCaptcha-window-float');
+                if (modal) {
+                    const btns = modal.querySelectorAll('.aliyunCaptcha-top span, .aliyunCaptcha-top svg, [class*="refresh"], [id*="refresh"]');
+                    if (btns.length > 0) btns[btns.length - 1].click();
+                }
+            }""")
+        except Exception:
+            pass
 
     # ---- teardown ----
     def stop(self):

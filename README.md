@@ -85,6 +85,8 @@ Bypass modern behavioral bot detection (Cloudflare, Akamai, Datadome):
 * **`br.human_type(page, selector, text)`**: Types with natural Gaussian delay distribution (45–80 WPM), punctuation hesitation pauses, and **simulates human typos (2% rate) with automated Backspace correction**.
 * **`br.human_scroll(page, delta_y)`**: Smooth scrolling utilizing a sinusoidal easing curve.
 * **`br.drag_slider(page, handle_selector, distance_x)`**: Realistic S-curve slider drag with variable velocity and Y-axis micro-drift for Aliyun and Geetest puzzle captchas.
+* **`br.calculate_aliyun_puzzle_gap(page)`**: Computes the exact horizontal puzzle cutout gap (`distance_x`) using an in-page V8 Canvas correlation engine with zero external Python dependencies and 0 MB RAM overhead (plus optional CV2 acceleration).
+* **`br.solve_and_verify_aliyun(page)`**: End-to-end automated Aliyun sliding puzzle solver (gap detection + human S-curve drag + verification handshake + auto-retry).
 
 ---
 
