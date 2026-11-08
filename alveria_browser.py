@@ -1278,56 +1278,9 @@ class Alveria:
     def page(self):
         from playwright.sync_api import sync_playwright
         if self._browser is None:
-            # Mode Camoufox C++ Engine (Universal Anti-Bot Master)
-            has_camoufox = False
-            try:
-                from camoufox.sync_api import Camoufox
-                has_camoufox = True
-            except ImportError:
-                has_camoufox = False
-
-            should_use_camoufox = (self.engine == "camoufox") or (self.engine == "auto" and has_camoufox and (sys.platform == "win32" or not CORE.exists()))
-
-            if should_use_camoufox:
-                self._log(f"Inisialisasi Camoufox C++ Engine (Universal Anti-Detect) | profile={self.profile.name}")
-                from camoufox.sync_api import Camoufox
-                cf_kwargs = {
-                    "headless": self.headless,
-                    "humanize": True,
-                    "os": "windows" if "win" in self.profile.name else ("macos" if "mac" in self.profile.name else "linux"),
-                    "locale": self.profile.locale,
-                    "block_images": self.block_images,
-                }
-                if self.proxy:
-                    cf_kwargs["proxy"] = {"server": self.proxy}
-                    if self.geoip_enabled:
-                        cf_kwargs["geoip"] = True
-                self._camoufox_cm = Camoufox(**cf_kwargs)
-                self._browser = self._camoufox_cm.__enter__()
-                self._ctx = self._browser.new_context(
-                    viewport={"width": self.profile.screen[0], "height": min(self.profile.screen[1], 1080)}
-                )
-                self._ctx.add_init_script(stealth_js(self.profile, self.session_seed))
-                pg = self._ctx.new_page()
-                pg.set_default_timeout(35000)
-
-                def route_filter_cf(route):
-                    req = route.request
-                    url = req.url.lower()
-                    r_type = req.resource_type
-                    if self.block_trackers and any(domain in url for domain in TRACKER_DOMAINS):
-                        return route.abort()
-                    if self.block_images and r_type in ("image", "media", "imageset"):
-                        return route.abort()
-                    if self.block_fonts and r_type == "font":
-                        return route.abort()
-                    route.continue_()
-
-                pg.route("**/*", route_filter_cf)
-                return pg
-
             self._pw = sync_playwright().start()
             if sys.platform == "win32" or self.proc is None:
+                self._log(f"Inisialisasi Alveria Native Engine | profile={self.profile.name}")
                 launch_kwargs = {
                     "headless": self.headless,
                     "args": [
@@ -1727,7 +1680,16 @@ class Alveria:
         2. Fallback / Accelerated CV2 Engine jika OpenCV tersedia di runtime Python.
         Returns: { 'slider_travel': float, 'target_x': float, 'confidence': float, 'method': str }
         """
-        # Coba In-Page V8 Canvas Engine terlebih dahulu (Zero-Dependency & Zero Overhead)
+        # 1. Prioritaskan CV2 Shadow Notch + Edge Refinement jika OpenCV tersedia
+        if HAS_CV2:
+            try:
+                res_cv2 = self._solve_aliyun_cv2(page, img_selector, puzzle_selector)
+                if res_cv2 and res_cv2.get("slider_travel", 0) > 0:
+                    return res_cv2
+            except Exception as ce:
+                self._log(f"CV2 solver error: {ce}")
+
+        # 2. In-Page V8 Canvas Engine (Zero-RAM, Zero-Dependency untuk STB ARM64)
         try:
             res = page.evaluate("""async ({ imgSel, pzSel }) => {
                 const bgImg = document.querySelector(imgSel);
@@ -1843,28 +1805,26 @@ class Alveria:
                 const pieceOffsetDom = minX * scale;
                 const requiredPuzzleMove = Math.max(0.0, targetGapDom - pieceOffsetDom);
 
-                const trackW = slider && slider.parentElement ? (slider.parentElement.getBoundingClientRect().width || 300) : 300;
-                const sliderTravel = Math.max(0.0, Math.min(trackW - 36, requiredPuzzleMove * (trackW / domWidth)));
+                // Formula FeiLin Alibaba Cloud Captcha V3:
+                // p = 240 * (s / 260)^2 + 20 * (s / 260)
+                // Inverse untuk mencari s (slider travel):
+                const p = Math.max(0.0, Math.min(260.0, requiredPuzzleMove));
+                const discriminant = 400.0 + 960.0 * p;
+                const u = discriminant >= 0 ? (-20.0 + Math.sqrt(discriminant)) / 480.0 : 0.0;
+                const sliderTravel = Math.max(0.0, Math.min(260.0, 260.0 * Math.max(0.0, Math.min(1.0, u))));
 
                 return {
                     target_x: bestX,
                     slider_travel: sliderTravel,
                     confidence: bestScore,
                     scale: scale,
-                    method: "In-Page V8 Canvas Engine (Zero-RAM)"
+                    method: "In-Page V8 Canvas Engine (FeiLin Quadratic Inverse)"
                 };
             }""", {"imgSel": img_selector, "pzSel": puzzle_selector})
             if res and res.get("slider_travel", 0) > 0:
                 return res
         except Exception as e:
             self._log(f"In-Page V8 solver warning: {e}")
-
-        # Fallback ke CV2 Engine jika OpenCV tersedia
-        if HAS_CV2:
-            try:
-                return self._solve_aliyun_cv2(page, img_selector, puzzle_selector)
-            except Exception as ce:
-                self._log(f"CV2 solver error: {ce}")
 
         return None
 
@@ -1901,37 +1861,63 @@ class Alveria:
             gray = cv2.cvtColor(pz, cv2.COLOR_BGR2GRAY) if pz.ndim == 3 else pz
             alpha = (gray > 10).astype(np.uint8) * 255
 
-        pts = np.argwhere(alpha > 80)
+        pts = np.argwhere(alpha > 20)
         if pts.size == 0:
             return None
 
         min_y, min_x = int(pts[:, 0].min()), int(pts[:, 1].min())
         max_y, max_x = int(pts[:, 0].max()), int(pts[:, 1].max())
-        piece = pz[min_y:max_y+1, min_x:max_x+1, :3]
-        mask = (alpha[min_y:max_y+1, min_x:max_x+1] > 80).astype(np.uint8) * 255
+        piece_w = max_x - min_x + 1
 
-        pad = 8
+        # 1. Darkness profile horizontal across puzzle band
+        band = bg[min_y:max_y+1, :]
+        col_b = band.mean(axis=(0, 2))
+        start_search = max(35, min_x + piece_w + 5)
+        end_search = min(bg.shape[1] - piece_w - 5, 260)
+
+        window_scores = [col_b[x:x+piece_w].mean() for x in range(start_search, end_search)]
+        notch_x = int(np.argmin(window_scores)) + start_search
+        min_darkness = float(window_scores[notch_x - start_search])
+
+        # 2. Canny Edge Refinement di sekitar notch (+- 16px)
+        mask = (alpha[min_y:max_y+1, min_x:max_x+1] > 20).astype(np.uint8) * 255
+        piece_outline = cv2.Canny(mask, 80, 200)
+
+        pad = 4
         y_s = max(0, min_y - pad)
         y_e = min(bg.shape[0], max_y + 1 + pad)
-        bg_band = bg[y_s:y_e, :]
+        bg_band_gray = cv2.cvtColor(bg[y_s:y_e, :], cv2.COLOR_BGR2GRAY)
+        bg_band_edge = cv2.Canny(bg_band_gray, 50, 150)
 
-        res = cv2.matchTemplate(bg_band, piece, cv2.TM_CCOEFF_NORMED, mask=mask)
-        res[:, :max(70, min_x + 15)] = -1.0
-        res[:, int(bg.shape[1] - piece.shape[1] + 1):] = -1.0
-        np.nan_to_num(res, copy=False, nan=-1.0)
-        _, max_val, _, max_loc = cv2.minMaxLoc(res)
+        w_start = max(start_search, notch_x - 16)
+        w_end = min(end_search, notch_x + 16)
 
-        final_x = float(max_loc[0])
+        res_edge = cv2.matchTemplate(bg_band_edge[:, w_start:w_end+piece_w], piece_outline, cv2.TM_CCOEFF_NORMED)
+        np.nan_to_num(res_edge, copy=False, nan=-1.0)
+
+        final_x = float(notch_x)
+        conf = 0.85
+        if res_edge.size > 0 and float(res_edge.max()) > 0.20:
+            _, max_e, _, loc_e = cv2.minMaxLoc(res_edge)
+            final_x = float(w_start + loc_e[0])
+            conf = float(max_e)
+            method = f"Shadow Notch + Edge Refinement (notch={notch_x}, edge={final_x:.1f}, conf={conf:.3f})"
+        else:
+            method = f"Shadow Notch Cutout (notch={notch_x}, darkness={min_darkness:.1f})"
+
         scale_x = 300.0 / bg.shape[1]
         puzzle_disp = (final_x - min_x) * scale_x
-        # DOM scale translasi
-        slider_dist = puzzle_disp * (260.0 / 256.0)
+        # Formula Inverse Quadratic Mapping FeiLin
+        p_val = max(0.0, min(260.0, float(puzzle_disp)))
+        disc = 400.0 + 960.0 * p_val
+        u_val = (-20.0 + math.sqrt(disc)) / 480.0 if disc >= 0 else 0.0
+        slider_dist = max(0.0, min(260.0, 260.0 * max(0.0, min(1.0, u_val))))
 
         return {
             "target_x": final_x,
             "slider_travel": float(slider_dist),
-            "confidence": float(max_val),
-            "method": f"Python OpenCV CV2 (conf={max_val:.3f})"
+            "confidence": float(conf),
+            "method": method
         }
 
     def solve_and_verify_aliyun(
@@ -2038,12 +2024,6 @@ class Alveria:
 
     # ---- teardown ----
     def stop(self):
-        if hasattr(self, "_camoufox_cm") and self._camoufox_cm:
-            try:
-                self._camoufox_cm.__exit__(None, None, None)
-                self._camoufox_cm = None
-            except Exception:
-                pass
         for fn in (
             lambda: self._browser and self._browser.close(),
             lambda: self._pw and self._pw.stop(),
