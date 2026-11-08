@@ -1241,10 +1241,12 @@ class Alveria:
 
     # ---- lifecycle ----
     def start(self):
-        if not CORE.exists():
-            ensure_core()
         (HOME / "storage" / self.profile.name).mkdir(parents=True, exist_ok=True)
         (HOME / "logs").mkdir(parents=True, exist_ok=True)
+
+        if sys.platform == "win32" or not CORE.exists():
+            self._log(f"Mode Local Engine aktif (platform={sys.platform}) | profile={self.profile.name}")
+            return {"Browser": "Alveria-Local-Engine/0.4", "Platform": sys.platform}
 
         cmd = [str(CORE), "--stealth", "--user-agent", self.profile.ua]
         if self.proxy:
@@ -1253,8 +1255,9 @@ class Alveria:
                 "serve", "--port", str(self.port), "--workers", "1"]
 
         logf = open(HOME / "logs" / f"core-{self.profile.name}.log", "a")
+        preexec = getattr(os, "setsid", None)
         self.proc = subprocess.Popen(cmd, env=self._env(), stdout=logf,
-                                     stderr=subprocess.STDOUT, preexec_fn=os.setsid)
+                                     stderr=subprocess.STDOUT, preexec_fn=preexec)
 
         deadline = time.time() + 40
         while time.time() < deadline:
@@ -1273,7 +1276,21 @@ class Alveria:
         from playwright.sync_api import sync_playwright
         if self._browser is None:
             self._pw = sync_playwright().start()
-            self._browser = self._pw.chromium.connect_over_cdp(f"http://127.0.0.1:{self.port}")
+            if sys.platform == "win32" or self.proc is None:
+                launch_kwargs = {
+                    "headless": self.headless,
+                    "args": [
+                        "--disable-blink-features=AutomationControlled",
+                        "--no-sandbox",
+                        "--disable-infobars",
+                        f"--window-size={self.profile.screen[0]},{self.profile.screen[1]}"
+                    ]
+                }
+                if self.proxy:
+                    launch_kwargs["proxy"] = {"server": self.proxy}
+                self._browser = self._pw.chromium.launch(**launch_kwargs)
+            else:
+                self._browser = self._pw.chromium.connect_over_cdp(f"http://127.0.0.1:{self.port}")
             ctx_kwargs = dict(
                 viewport={"width": self.profile.screen[0], "height": min(self.profile.screen[1], 1080)},
                 device_scale_factor=self.profile.device_scale,
@@ -1980,11 +1997,17 @@ class Alveria:
                 pass
         if self.proc and self.proc.poll() is None:
             try:
-                os.killpg(os.getpgid(self.proc.pid), signal.SIGTERM)
+                if hasattr(os, "killpg") and hasattr(os, "getpgid"):
+                    os.killpg(os.getpgid(self.proc.pid), signal.SIGTERM)
+                else:
+                    self.proc.terminate()
                 self.proc.wait(timeout=8)
             except Exception:
                 try:
-                    os.killpg(os.getpgid(self.proc.pid), signal.SIGKILL)
+                    if hasattr(os, "killpg") and hasattr(os, "getpgid"):
+                        os.killpg(os.getpgid(self.proc.pid), signal.SIGKILL)
+                    else:
+                        self.proc.kill()
                 except Exception:
                     pass
 
