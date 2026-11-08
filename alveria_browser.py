@@ -1165,7 +1165,10 @@ class Alveria:
                  auto_turnstile: bool = True, spa_mode: bool = False,
                  headless: bool = True, block_trackers: bool = True,
                  block_images: bool = False, block_fonts: bool = False,
+                 engine: str = "auto",
                  extra_env: dict | None = None, log: bool = True):
+        self.engine = engine.lower()
+        self._camoufox_cm = None
         self.spa_mode = spa_mode
         self.block_images = True if spa_mode else block_images
         self.block_fonts = True if spa_mode else block_fonts
@@ -1275,6 +1278,54 @@ class Alveria:
     def page(self):
         from playwright.sync_api import sync_playwright
         if self._browser is None:
+            # Mode Camoufox C++ Engine (Universal Anti-Bot Master)
+            has_camoufox = False
+            try:
+                from camoufox.sync_api import Camoufox
+                has_camoufox = True
+            except ImportError:
+                has_camoufox = False
+
+            should_use_camoufox = (self.engine == "camoufox") or (self.engine == "auto" and has_camoufox and (sys.platform == "win32" or not CORE.exists()))
+
+            if should_use_camoufox:
+                self._log(f"Inisialisasi Camoufox C++ Engine (Universal Anti-Detect) | profile={self.profile.name}")
+                from camoufox.sync_api import Camoufox
+                cf_kwargs = {
+                    "headless": self.headless,
+                    "humanize": True,
+                    "os": "windows" if "win" in self.profile.name else ("macos" if "mac" in self.profile.name else "linux"),
+                    "locale": self.profile.locale,
+                    "block_images": self.block_images,
+                }
+                if self.proxy:
+                    cf_kwargs["proxy"] = {"server": self.proxy}
+                    if self.geoip_enabled:
+                        cf_kwargs["geoip"] = True
+                self._camoufox_cm = Camoufox(**cf_kwargs)
+                self._browser = self._camoufox_cm.__enter__()
+                self._ctx = self._browser.new_context(
+                    viewport={"width": self.profile.screen[0], "height": min(self.profile.screen[1], 1080)}
+                )
+                self._ctx.add_init_script(stealth_js(self.profile, self.session_seed))
+                pg = self._ctx.new_page()
+                pg.set_default_timeout(35000)
+
+                def route_filter_cf(route):
+                    req = route.request
+                    url = req.url.lower()
+                    r_type = req.resource_type
+                    if self.block_trackers and any(domain in url for domain in TRACKER_DOMAINS):
+                        return route.abort()
+                    if self.block_images and r_type in ("image", "media", "imageset"):
+                        return route.abort()
+                    if self.block_fonts and r_type == "font":
+                        return route.abort()
+                    route.continue_()
+
+                pg.route("**/*", route_filter_cf)
+                return pg
+
             self._pw = sync_playwright().start()
             if sys.platform == "win32" or self.proc is None:
                 launch_kwargs = {
@@ -1987,6 +2038,12 @@ class Alveria:
 
     # ---- teardown ----
     def stop(self):
+        if hasattr(self, "_camoufox_cm") and self._camoufox_cm:
+            try:
+                self._camoufox_cm.__exit__(None, None, None)
+                self._camoufox_cm = None
+            except Exception:
+                pass
         for fn in (
             lambda: self._browser and self._browser.close(),
             lambda: self._pw and self._pw.stop(),
